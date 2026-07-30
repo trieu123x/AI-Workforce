@@ -1,0 +1,491 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────
+   TailAdmin-Inspired Design Tokens
+   Light mode dashboard + Dark navy sidebar
+───────────────────────────────────────────────── */
+:root {
+  /* ── Layout Backgrounds ── */
+  --body-bg: #F1F5F9;
+  --card-bg: #FFFFFF;
+  --sidebar-bg: #1C2434;
+  --sidebar-bg-hover: #243046;
+  --topbar-bg: #FFFFFF;
+
+  /* ── Borders ── */
+  --border: #E2E8F0;
+  --border-mid: #CBD5E1;
+  --border-dark: rgba(255, 255, 255, 0.08);  /* sidebar borders */
+
+  /* ── Text Colors ── */
+  --text-dark: #1C2434;
+  --text-body: #374151;
+  --text-muted: #64748B;
+  --text-light: #94A3B8;
+
+  /* Sidebar (WHITE – matching TailAdmin demo) */
+  --sidebar-bg: #FFFFFF;
+  --sidebar-border: #E2E8F0;
+  --sidebar-label: #94A3B8;
+  --sidebar-text: #374151;
+  --sidebar-text-hover: #1C2434;
+  --sidebar-text-muted: #94A3B8;
+  --sidebar-active-bg: #EEF2FF;
+  --sidebar-active-text: #3C50E0;
+  --sidebar-active-border: #3C50E0;
+  --sidebar-hover-bg: #F8FAFC;
+
+  /* ── Brand / Primary ── */
+  --primary: #3C50E0;
+  --primary-hover: #3446C5;
+  --primary-light: rgba(60, 80, 224, 0.12);
+  --primary-glow: rgba(60, 80, 224, 0.25);
+
+  /* Gradient accent (kept for logo) */
+  --accent-from: #6366f1;
+  --accent-to: #8b5cf6;
+
+  /* ── Status Colors ── */
+  --success: #10B981;
+  --success-bg: #D1FAE5;
+  --success-text: #065F46;
+
+  --warning: #FFBA24;
+  --warning-bg: #FEF3C7;
+  --warning-text: #92400E;
+
+  --danger: #EF4444;
+  --danger-bg: #FEE2E2;
+  --danger-text: #991B1B;
+
+  --info: #3B82F6;
+  --info-bg: #DBEAFE;
+  --info-text: #1E40AF;
+
+  /* ── Shadows ── */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
+  --shadow-lg: 0 10px 32px rgba(0,0,0,0.10), 0 4px 8px rgba(0,0,0,0.06);
+
+  /* ── Legacy dark vars (used in agent chat dark areas) ── */
+  --bg-primary: #070711;
+  --bg-secondary: #0d0d1a;
+  --bg-card: rgba(255, 255, 255, 0.04);
+  --bg-card-hover: rgba(255, 255, 255, 0.07);
+  --bg-input: rgba(255, 255, 255, 0.06);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.55);
+  --accent-glow: rgba(99, 102, 241, 0.25);
+}
+
+/* ─────────────────────────────────────────────────
+   Reset & Base
+───────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--body-bg);
+  color: var(--text-body);
+  line-height: 1.5;
+  overflow-x: hidden;
+  min-height: 100vh;
+}
+
+/* ─────────────────────────────────────────────────
+   Scrollbar
+───────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-mid);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+
+/* ─────────────────────────────────────────────────
+   TailAdmin Card
+───────────────────────────────────────────────── */
+.ta-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.ta-card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--border-mid);
+}
+
+/* ─────────────────────────────────────────────────
+   TailAdmin Buttons
+───────────────────────────────────────────────── */
+.ta-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+  outline: none;
+  letter-spacing: 0.01em;
+}
+
+.ta-btn-primary {
+  background: var(--primary);
+  color: #FFFFFF;
+}
+.ta-btn-primary:hover {
+  background: var(--primary-hover);
+  box-shadow: 0 6px 20px var(--primary-glow);
+  transform: translateY(-1px);
+}
+.ta-btn-primary:active { transform: translateY(0); }
+
+.ta-btn-outline {
+  background: transparent;
+  color: var(--primary);
+  border: 1.5px solid var(--primary);
+}
+.ta-btn-outline:hover {
+  background: var(--primary-light);
+}
+
+.ta-btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.ta-btn-ghost:hover {
+  background: var(--body-bg);
+  color: var(--text-body);
+}
+
+/* ─────────────────────────────────────────────────
+   Status Badges – TailAdmin Style
+───────────────────────────────────────────────── */
+.ta-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.ta-badge-success {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+.ta-badge-warning {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+.ta-badge-danger {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+.ta-badge-info {
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+.ta-badge-neutral {
+  background: #F1F5F9;
+  color: var(--text-muted);
+}
+
+/* ─────────────────────────────────────────────────
+   Inputs – TailAdmin Style (Light)
+───────────────────────────────────────────────── */
+.ta-input {
+  width: 100%;
+  background: var(--card-bg);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 16px;
+  color: var(--text-dark);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.ta-input::placeholder { color: var(--text-light); }
+.ta-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+/* ─────────────────────────────────────────────────
+   Dark Input (for chat/dark areas)
+───────────────────────────────────────────────── */
+.input-field {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 12px 16px;
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.925rem;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+.input-field::placeholder { color: rgba(255,255,255,0.28); }
+.input-field:focus {
+  border-color: var(--accent-from);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* ─────────────────────────────────────────────────
+   Sidebar Item
+───────────────────────────────────────────────── */
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  color: var(--sidebar-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-decoration: none;
+  border: none;
+  background: none;
+  font-family: 'Inter', sans-serif;
+}
+.sidebar-item:hover {
+  background: var(--sidebar-bg-hover);
+  color: var(--sidebar-text-hover);
+}
+.sidebar-item.active {
+  background: var(--sidebar-active-bg);
+  color: var(--sidebar-active-text);
+}
+
+/* ─────────────────────────────────────────────────
+   Status Dot (online/offline)
+───────────────────────────────────────────────── */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.online {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  animation: pulse-green 2s infinite;
+}
+.status-dot.idle { background: var(--warning); }
+.status-dot.offline { background: var(--text-light); }
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 4px var(--success); }
+  50% { box-shadow: 0 0 10px var(--success), 0 0 4px var(--success); }
+}
+
+/* ─────────────────────────────────────────────────
+   Gradient Text (logo / branding)
+───────────────────────────────────────────────── */
+.gradient-text {
+  background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ─────────────────────────────────────────────────
+   Gradient Button (kept for chat send button)
+───────────────────────────────────────────────── */
+.btn-gradient {
+  background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
+  color: white;
+  border: none;
+  border-radius: 10px;
+  padding: 12px 24px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: opacity 0.2s ease, transform 0.1s ease, box-shadow 0.2s ease;
+  letter-spacing: 0.01em;
+  font-family: 'Inter', sans-serif;
+}
+.btn-gradient:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px var(--accent-glow);
+}
+.btn-gradient:active { transform: translateY(0); }
+.btn-gradient:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ─────────────────────────────────────────────────
+   Glass Card (for dark sections / agent chat)
+───────────────────────────────────────────────── */
+.glass-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.glass-card:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+/* ─────────────────────────────────────────────────
+   Topbar (TailAdmin header bar)
+───────────────────────────────────────────────── */
+.ta-topbar {
+  background: var(--topbar-bg);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  height: 64px;
+  flex-shrink: 0;
+}
+
+/* ─────────────────────────────────────────────────
+   KPI Card
+───────────────────────────────────────────────── */
+.kpi-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.kpi-card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--border-mid);
+  transform: translateY(-2px);
+}
+
+/* ─────────────────────────────────────────────────
+   Breadcrumb
+───────────────────────────────────────────────── */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.breadcrumb a { color: var(--text-muted); text-decoration: none; }
+.breadcrumb a:hover { color: var(--primary); }
+.breadcrumb-sep { color: var(--border-mid); }
+.breadcrumb-current { color: var(--text-dark); font-weight: 600; }
+
+/* ─────────────────────────────────────────────────
+   Table – TailAdmin Style
+───────────────────────────────────────────────── */
+.ta-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.ta-table th {
+  text-align: left;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 12px 16px;
+  background: #F8FAFC;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ta-table td {
+  padding: 13px 16px;
+  font-size: 0.875rem;
+  color: var(--text-body);
+  border-bottom: 1px solid var(--border);
+}
+.ta-table tr:last-child td { border-bottom: none; }
+.ta-table tbody tr {
+  transition: background 0.15s ease;
+}
+.ta-table tbody tr:hover { background: #F8FAFC; }
+
+/* ─────────────────────────────────────────────────
+   Animations
+───────────────────────────────────────────────── */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in-up { animation: fadeInUp 0.35s ease forwards; }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.fade-in { animation: fadeIn 0.3s ease forwards; }
+
+/* Progress bar animation */
+@keyframes growWidth {
+  from { width: 0%; }
+  to { width: var(--target-width); }
+}
+
+/* ─────────────────────────────────────────────────
+   Sidebar section label
+───────────────────────────────────────────────── */
+.sidebar-section-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--sidebar-text-muted);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0 12px;
+  margin-bottom: 6px;
+  margin-top: 20px;
+}
+
+/* ─────────────────────────────────────────────────
+   Icon box (for KPI card icons)
+───────────────────────────────────────────────── */
+.icon-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}

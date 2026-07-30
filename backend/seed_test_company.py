@@ -1,0 +1,160 @@
+"""
+Seed script: Tạo công ty test với:
+  - Tenant: Test Company
+  - CEO: test@gmail.com / 123456
+  - Nhân viên: test1@gmail.com -> test40@gmail.com / 123456 (mỗi người thuộc dept khác nhau)
+"""
+
+import sys
+import uuid
+import logging
+from app.core.database import sync_engine, Base, SyncSessionLocal
+from app.core.security import get_password_hash
+from app.models.models import Tenant, User, AIAgent, UserMemory
+import json
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+logger = logging.getLogger("seed_test_company")
+
+# Phân bổ department cho 40 nhân viên
+DEPARTMENTS = ["IT", "HR", "FINANCE", "SALES", "LEGAL", "IT", "HR", "FINANCE"]
+
+def seed():
+    # Đảm bảo bảng tồn tại
+    Base.metadata.create_all(bind=sync_engine)
+
+    db = SyncSessionLocal()
+    try:
+        # ────────────────────────────────────────────
+        # 1. Tenant
+        # ────────────────────────────────────────────
+        tenant = db.query(Tenant).filter(Tenant.domain == "testcompany.local").first()
+        if not tenant:
+            tenant = Tenant(
+                id=uuid.uuid4(),
+                name="Test Company",
+                domain="testcompany.local",
+            )
+            db.add(tenant)
+            db.commit()
+            db.refresh(tenant)
+            logger.info(f"✅ Tạo Tenant: {tenant.name} (id={tenant.id})")
+        else:
+            logger.info(f"ℹ️  Tenant đã tồn tại: {tenant.name}")
+
+        # ────────────────────────────────────────────
+        # 2. CEO
+        # ────────────────────────────────────────────
+        ceo_email = "test@gmail.com"
+        ceo = db.query(User).filter(User.email == ceo_email).first()
+        if not ceo:
+            ceo = User(
+                id=uuid.uuid4(),
+                tenant_id=tenant.id,
+                email=ceo_email,
+                full_name="CEO Test",
+                password_hash=get_password_hash("123456"),
+                role="CEO",
+                department="BOARD",
+            )
+            db.add(ceo)
+            db.commit()
+            db.refresh(ceo)
+            logger.info(f"✅ Tạo CEO: {ceo_email}")
+        else:
+            logger.info(f"ℹ️  CEO đã tồn tại: {ceo_email}")
+
+        # ────────────────────────────────────────────
+        # 3. 40 nhân viên test1 -> test40
+        # ────────────────────────────────────────────
+        for i in range(1, 41):
+            email = f"test{i}@gmail.com"
+            existing = db.query(User).filter(User.email == email).first()
+            if existing:
+                logger.info(f"  ↩️  Bỏ qua (đã tồn tại): {email}")
+                continue
+
+            dept = DEPARTMENTS[(i - 1) % len(DEPARTMENTS)]
+            role = "Manager" if i % 8 == 0 else "Employee"  # mỗi 8 người có 1 manager
+
+            user = User(
+                id=uuid.uuid4(),
+                tenant_id=tenant.id,
+                email=email,
+                full_name=f"Nhân Viên Test {i}",
+                password_hash=get_password_hash("123456"),
+                role=role,
+                department=dept,
+            )
+            db.add(user)
+
+            # Seed leave balance cho mỗi nhân viên
+            db.flush()  # lấy id
+            mem = UserMemory(
+                id=uuid.uuid4(),
+                tenant_id=tenant.id,
+                user_id=user.id,
+                memory_category="hr",
+                memory_key="leave_balance",
+                memory_value=json.dumps({
+                    "total_days": 12,
+                    "used_days": 0,
+                    "remaining_days": 12
+                }),
+                confidence_score=1.0,
+            )
+            db.add(mem)
+            logger.info(f"  ✅ {email} | {role} | {dept}")
+
+        db.commit()
+
+        # ────────────────────────────────────────────
+        # 4. AI Agents cho tenant Test Company
+        # ────────────────────────────────────────────
+        agents_data = [
+            {"role_code": "CEO",       "name": "CEO Master Agent",       "avatar_emoji": "👔", "model_name": "gpt-4o"},
+            {"role_code": "HR",        "name": "HR AI Employee",         "avatar_emoji": "🧑‍💼", "model_name": "gpt-4o"},
+            {"role_code": "KNOWLEDGE", "name": "Knowledge Base AI",      "avatar_emoji": "📚", "model_name": "gpt-4o"},
+            {"role_code": "LEGAL",     "name": "Legal Counsel AI",       "avatar_emoji": "⚖️",  "model_name": "gpt-4o"},
+            {"role_code": "IT",        "name": "IT Support AI",          "avatar_emoji": "💻", "model_name": "gpt-4o"},
+            {"role_code": "FINANCE",   "name": "Finance & Accounting AI","avatar_emoji": "💰", "model_name": "gpt-4o"},
+            {"role_code": "SALES",     "name": "Sales & CRM AI",         "avatar_emoji": "📈", "model_name": "gpt-4o"},
+        ]
+
+        for adata in agents_data:
+            agent = db.query(AIAgent).filter(
+                AIAgent.tenant_id == tenant.id,
+                AIAgent.role_code == adata["role_code"]
+            ).first()
+            if not agent:
+                agent = AIAgent(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant.id,
+                    role_code=adata["role_code"],
+                    name=adata["name"],
+                    avatar_emoji=adata["avatar_emoji"],
+                    model_name=adata["model_name"],
+                    description=f"{adata['name']} cho Test Company",
+                    system_prompt=f"You are the {adata['name']} AI Agent.",
+                    is_active=True,
+                    tools_access=["query_leave_balance", "request_leave", "hybrid_rag_search"],
+                )
+                db.add(agent)
+                logger.info(f"  ✅ Agent: {adata['role_code']}")
+        db.commit()
+
+        logger.info("\n🎉 Seed hoàn tất!")
+        logger.info(f"   Tenant : Test Company (domain=testcompany.local)")
+        logger.info(f"   CEO    : test@gmail.com / 123456")
+        logger.info(f"   NV     : test1@gmail.com -> test40@gmail.com / 123456")
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Lỗi: {e}")
+        raise
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    seed()
