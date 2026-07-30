@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 
 os.environ.setdefault("POSTGRES_PASSWORD", "test-database-password")
 os.environ.setdefault("SECRET_KEY", "test-signing-key-not-for-production")
-os.environ.setdefault("SEED_DEFAULT_PASSWORD", "Password123!")
+# The fixtures below authenticate with this deterministic test-only password.
+# Override ambient values so developer shells and CI cannot make the suite flaky.
+os.environ["SEED_DEFAULT_PASSWORD"] = "Password123!"
 
 from app.main import app
 from app.core.database import get_db, sync_engine

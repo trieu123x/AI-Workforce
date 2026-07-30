@@ -51,7 +51,6 @@ jobs:
       POSTGRES_PASSWORD: test-database-password
       DATABASE_URL: postgresql+asyncpg://postgres:test-database-password@localhost:5432/ai_workforce_test
       SECRET_KEY: test-signing-key-not-for-production
-      SEED_DEFAULT_PASSWORD: test-seed-password-not-for-production
       REDIS_URL: redis://localhost:6379/0
       FRONTEND_URL: http://localhost:3000
     defaults:
