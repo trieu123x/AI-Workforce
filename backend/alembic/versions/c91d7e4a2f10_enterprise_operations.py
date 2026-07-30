@@ -51,6 +51,10 @@ def _accept_complete_create_all_schema() -> bool:
             "status",
             "error_message",
         },
+        "llm_cost_logs": {
+            "user_id",
+            "department",
+        },
         "notifications": {
             "id",
             "tenant_id",
@@ -119,7 +123,7 @@ def _accept_complete_create_all_schema() -> bool:
     drift_detected = any(
         table in table_names
         for table in required_columns
-        if table not in {"tenants", "audit_logs"}
+        if table not in {"tenants", "audit_logs", "llm_cost_logs"}
     ) or bool(required_columns["tenants"] & tenant_columns)
     if not drift_detected:
         return False
@@ -207,10 +211,23 @@ def _accept_complete_create_all_schema() -> bool:
         ),
         "error_message": sa.Column("error_message", sa.Text(), nullable=True),
     }
+    llm_cost_column_definitions = {
+        "user_id": sa.Column(
+            "user_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.id"),
+            nullable=True,
+        ),
+        "department": sa.Column(
+            "department", sa.String(50), nullable=True
+        ),
+    }
     reconcilable = {
         f"column tenants.{name}" for name in tenant_column_definitions
     } | {
         f"column audit_logs.{name}" for name in audit_column_definitions
+    } | {
+        f"column llm_cost_logs.{name}" for name in llm_cost_column_definitions
     }
     unreconciled = [item for item in missing if item not in reconcilable]
     if unreconciled:
@@ -223,6 +240,8 @@ def _accept_complete_create_all_schema() -> bool:
         op.add_column("tenants", tenant_column_definitions[name])
     for name in sorted(missing_columns.get("audit_logs", set())):
         op.add_column("audit_logs", audit_column_definitions[name])
+    for name in sorted(missing_columns.get("llm_cost_logs", set())):
+        op.add_column("llm_cost_logs", llm_cost_column_definitions[name])
 
     op.execute("UPDATE audit_logs SET action = tool_name WHERE action IS NULL")
     indexes = {
@@ -316,6 +335,20 @@ def upgrade() -> None:
     )
     op.add_column(
         "tenants", sa.Column("billing_email", sa.String(255), nullable=True)
+    )
+
+    op.add_column(
+        "llm_cost_logs",
+        sa.Column(
+            "user_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.id"),
+            nullable=True,
+        ),
+    )
+    op.add_column(
+        "llm_cost_logs",
+        sa.Column("department", sa.String(50), nullable=True),
     )
 
     op.add_column(
@@ -577,6 +610,9 @@ def downgrade() -> None:
         "idx_notifications_user_created", table_name="notifications"
     )
     op.drop_table("notifications")
+
+    op.drop_column("llm_cost_logs", "department")
+    op.drop_column("llm_cost_logs", "user_id")
 
     op.drop_index("idx_audit_actor", table_name="audit_logs")
     op.drop_index("idx_audit_tenant_created", table_name="audit_logs")

@@ -67,11 +67,13 @@ def hybrid_search_documents(
     for chunk in chunks:
         # 1. Cosine similarity score for dense embedding
         dense_score = 0.0
-        if chunk.dense_embedding:
+        embedding = chunk.dense_embedding
+        if embedding is not None and len(embedding) > 0:
             # dot product of unit vectors = cosine similarity
             try:
-                vec = chunk.dense_embedding
-                dot = sum(a * b for a, b in zip(query_vector, vec))
+                dot = float(
+                    sum(float(a) * float(b) for a, b in zip(query_vector, embedding))
+                )
                 dense_score = max(0.0, (dot + 1.0) / 2.0)  # scale to 0..1
             except Exception:
                 dense_score = 0.5
@@ -82,7 +84,7 @@ def hybrid_search_documents(
         sparse_score = len(matched_words) / max(len(query_words), 1)
 
         # 3. Hybrid RRF / weighted score
-        final_score = (dense_score * 0.7) + (sparse_score * 0.3)
+        final_score = float((dense_score * 0.7) + (sparse_score * 0.3))
 
         section_title = chunk.metadata_.get("section_title", f"Chunk {chunk.chunk_index}") if chunk.metadata_ else f"Chunk {chunk.chunk_index}"
 
