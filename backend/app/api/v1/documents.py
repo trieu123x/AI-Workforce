@@ -20,11 +20,26 @@ from app.core.database import get_db
 from app.core.security import get_current_active_user
 from app.models.models import DocumentChunk, User
 from app.services.rag_service import hybrid_search_documents, ingest_document
+from app.services.notification_service import create_notification
 
 router = APIRouter(prefix="/documents", tags=["Knowledge Documents"])
 KB_MANAGERS = {"Owner", "Admin", "CEO", "Manager"}
 VALID_DEPARTMENTS = {"BOARD", "HR", "LEGAL", "IT", "FINANCE", "SALES", "ALL"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _notify_indexed(db: Session, user: User, document_name: str, chunks: int) -> None:
+    create_notification(
+        db,
+        user=user,
+        event_type="DOCUMENT_READY",
+        title="Tài liệu đã xử lý xong",
+        message=f"{document_name}: {chunks} chunks đã được lập chỉ mục.",
+        severity="SUCCESS",
+        entity_type="DOCUMENT",
+        entity_id=document_name,
+    )
+    db.commit()
 
 
 class RAGSearchRequest(BaseModel):
@@ -258,6 +273,7 @@ def ingest_text_document(
         department_access=department,
         collection_name=collection_name.strip() or "General Knowledge",
     )
+    _notify_indexed(db, current_user, document_name.strip(), len(chunks))
     return {
         "success": True,
         "document_id": document_name.strip(),
@@ -291,6 +307,7 @@ async def upload_document(
         department_access=department,
         collection_name=collection_name.strip() or "General Knowledge",
     )
+    _notify_indexed(db, current_user, filename, len(chunks))
     return {
         "success": True,
         "document_id": filename,
@@ -323,6 +340,7 @@ def import_website(
         collection_name=req.collection_name,
         source_metadata={"source_type": "WEBSITE", "source_url": final_url},
     )
+    _notify_indexed(db, current_user, name, len(chunks))
     return {
         "success": True,
         "document_id": name,

@@ -18,6 +18,9 @@ from app.api.v1.users_mgmt import router as users_mgmt_router
 from app.api.v1.costs import router as costs_router
 from app.api.v1.workflows import router as workflows_router
 from app.api.v1.workspace import router as workspace_router
+from app.api.v1.management import router as management_router
+from app.api.v1.notifications import router as notifications_router
+from app.api.v1.integrations import router as integrations_router
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -37,3 +40,6 @@ api_router.include_router(users_mgmt_router)
 api_router.include_router(costs_router)
 api_router.include_router(workflows_router)
 api_router.include_router(workspace_router)
+api_router.include_router(management_router)
+api_router.include_router(notifications_router)
+api_router.include_router(integrations_router)

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import get_current_active_user
 from app.models.models import AgentWorkflow, AuditLog, User, UserMemory, WorkflowApproval
+from app.services.notification_service import create_notification
 
 router = APIRouter(prefix="/approvals", tags=["Workflow Approvals"])
 APPROVER_ROLES = {"Owner", "Admin", "CEO", "Manager"}
@@ -117,17 +118,36 @@ def process_approval_action(
 
     db.add(AuditLog(
         tenant_id=current_user.tenant_id,
+        actor_user_id=current_user.id,
+        actor_type="USER",
         workflow_id=approval.workflow_id,
         agent_role="APPROVAL",
         tool_name=req.action.lower(),
+        action=f"approval.{req.action.lower()}",
+        resource_type="APPROVAL",
+        resource_id=str(approval.id),
         input_parameters={
             "approval_id": str(approval.id),
             "approver_id": str(current_user.id),
             "original_payload": original_payload,
         },
         output_result={"status": approval.status, "payload": approval.payload},
+        before_data={"status": "WAITING", "payload": original_payload},
+        after_data={"status": approval.status, "payload": approval.payload},
+        status="SUCCESS",
         execution_time_ms=0,
     ))
+    create_notification(
+        db,
+        user=approval.workflow.initiator,
+        event_type="APPROVAL_DECIDED",
+        title="Yêu cầu đã được phê duyệt" if approved else "Yêu cầu bị từ chối",
+        message=approval.workflow.title,
+        severity="SUCCESS" if approved else "ERROR",
+        entity_type="WORKFLOW",
+        entity_id=str(approval.workflow_id),
+        dedup_key=f"approval-result:{approval.id}:{approval.status}",
+    )
     db.commit()
     return {
         "id": str(approval.id),

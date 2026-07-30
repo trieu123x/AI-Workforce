@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import get_current_active_user
 from app.models.models import AIAgent, AuditLog, Task, TaskComment, User
+from app.services.notification_service import notify_users
 
 router = APIRouter(prefix="/tasks", tags=["Task Management"])
 
@@ -134,14 +135,21 @@ def _add_history(
     db.add(AuditLog(
         id=uuid.uuid4(),
         tenant_id=current_user.tenant_id,
+        actor_user_id=current_user.id,
+        actor_type="USER",
         agent_role="TASK",
         tool_name=action,
+        action=action,
+        resource_type="TASK",
+        resource_id=str(task.id),
         input_parameters={
             "task_id": str(task.id),
             "actor_id": str(current_user.id),
             "actor_name": current_user.full_name,
         },
         output_result=changes,
+        after_data=changes,
+        status="SUCCESS",
         execution_time_ms=0,
     ))
 
@@ -300,6 +308,27 @@ def update_task(
             setattr(task, field_name, value)
     if changes:
         _add_history(db, task, current_user, "task_updated", changes)
+        if "status" in changes and task.status in {"COMPLETED", "FAILED"}:
+            recipients = [
+                user
+                for user in (task.creator, task.assignee)
+                if user is not None
+            ]
+            notify_users(
+                db,
+                recipients,
+                event_type=f"TASK_{task.status}",
+                title=(
+                    "Task đã hoàn thành"
+                    if task.status == "COMPLETED"
+                    else "Task thất bại"
+                ),
+                message=task.title,
+                severity="SUCCESS" if task.status == "COMPLETED" else "ERROR",
+                entity_type="TASK",
+                entity_id=str(task.id),
+                dedup_key=f"task-status:{task.id}:{task.status}",
+            )
         db.commit()
     return {"message": "Task updated successfully"}
 

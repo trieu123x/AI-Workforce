@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import get_current_active_user
 from app.models.models import AgentWorkflow, User, WorkflowApproval
+from app.services.notification_service import notify_users
 
 router = APIRouter(prefix="/workflows", tags=["Workflow Automation"])
 NodeType = Literal[
@@ -236,7 +237,7 @@ def run_workflow(
     if waiting_for_approval:
         node = nodes[approval_index]
         config = node.get("config", {})
-        db.add(WorkflowApproval(
+        approval = WorkflowApproval(
             workflow_id=run.id,
             action_type=config.get("action_type", node.get("name", "WORKFLOW_ACTION")),
             risk_level=config.get("risk_level", "MEDIUM"),
@@ -245,7 +246,25 @@ def run_workflow(
                 "requester_name": current_user.full_name,
             }),
             status="WAITING",
-        ))
+        )
+        db.add(approval)
+        db.flush()
+        approvers = db.query(User).filter(
+            User.tenant_id == current_user.tenant_id,
+            User.role.in_(("Owner", "Admin", "CEO", "Manager")),
+            User.is_active.is_(True),
+        ).all()
+        notify_users(
+            db,
+            approvers,
+            event_type="APPROVAL_REQUIRED",
+            title="Workflow cần phê duyệt",
+            message=run.title,
+            severity="WARNING",
+            entity_type="APPROVAL",
+            entity_id=str(approval.id),
+            dedup_key=f"approval:{approval.id}",
+        )
     db.commit()
     db.refresh(run)
     return _serialize(run)

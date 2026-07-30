@@ -11,6 +11,10 @@ from app.models.models import (
     ChatConversation,
     ChatMessage,
     Department,
+    Notification,
+    NotificationPreference,
+    IntegrationConnection,
+    IntegrationUsageLog,
 )
 
 __all__ = [
@@ -26,4 +30,8 @@ __all__ = [
     "ChatConversation",
     "ChatMessage",
     "Department",
+    "Notification",
+    "NotificationPreference",
+    "IntegrationConnection",
+    "IntegrationUsageLog",
 ]

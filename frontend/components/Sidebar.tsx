@@ -22,6 +22,10 @@ import {
   MessageCircle,
   Ticket,
   Calendar,
+  BarChart3,
+  ScrollText,
+  Bell,
+  Cable,
 } from "lucide-react";
 
 // ─── Nav Config ──────────────────────────────────────────────────────────────
@@ -197,6 +201,14 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
           active={pathname === "/dashboard"}
         />
 
+        <NavItem
+          icon={<BarChart3 size={18} />}
+          label="Management Analytics"
+          href="/analytics"
+          active={pathname === "/analytics"}
+          badge="NEW"
+        />
+
         {/* Quản Lý Chi Phí AI */}
         <NavItem
           icon={<DollarSign size={18} />}
@@ -252,6 +264,27 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
           label="Nhân Viên & Phân Quyền"
           href="/users-mgmt"
           active={pathname === "/users-mgmt"}
+        />
+
+        <NavItem
+          icon={<ScrollText size={18} />}
+          label="Audit Log"
+          href="/audit-logs"
+          active={pathname === "/audit-logs"}
+        />
+
+        <NavItem
+          icon={<Bell size={18} />}
+          label="Thông báo"
+          href="/notifications"
+          active={pathname === "/notifications"}
+        />
+
+        <NavItem
+          icon={<Cable size={18} />}
+          label="Tích hợp doanh nghiệp"
+          href="/integrations"
+          active={pathname === "/integrations"}
         />
 
         {/* ── AI EMPLOYEES Section ── */}
@@ -421,10 +454,9 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
 
         <NavItem
           icon={<Settings size={18} />}
-          label="Cài đặt"
-          href="#"
-          active={false}
-          disabled
+          label="Cài đặt công ty"
+          href="/settings"
+          active={pathname === "/settings"}
         />
         <NavItem
           icon={<HelpCircle size={18} />}

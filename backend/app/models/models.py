@@ -42,6 +42,20 @@ class Tenant(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     domain: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timezone: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="Asia/Ho_Chi_Minh"
+    )
+    language: Mapped[str] = mapped_column(String(10), nullable=False, default="vi")
+    data_retention_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=365
+    )
+    default_model: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="gpt-4o"
+    )
+    notification_settings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    security_settings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    billing_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -535,13 +549,30 @@ class AuditLog(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
     )
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    actor_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="SYSTEM"
+    )
     workflow_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("agent_workflows.id"), nullable=True
     )
     agent_role: Mapped[str] = mapped_column(String(50), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    action: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    resource_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     input_parameters: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     output_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    before_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    after_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="SUCCESS"
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -549,3 +580,163 @@ class AuditLog(Base):
 
     # Relationships
     workflow: Mapped["AgentWorkflow | None"] = relationship("AgentWorkflow", back_populates="audit_logs")
+    actor_user: Mapped["User | None"] = relationship("User")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    __table_args__ = (
+        Index("idx_notifications_user_created", "user_id", "created_at"),
+        Index("idx_notifications_user_unread", "user_id", "is_read"),
+        UniqueConstraint(
+            "tenant_id", "user_id", "dedup_key", name="uq_notification_dedup"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="INFO"
+    )
+    entity_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    channel: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="IN_APP"
+    )
+    delivery_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="DELIVERED"
+    )
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    dedup_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    user: Mapped["User"] = relationship("User")
+
+
+class NotificationPreference(Base):
+    __tablename__ = "notification_preferences"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_notification_preference_user"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    enabled_event_types: Mapped[dict] = mapped_column(JSONB, default=list)
+    enabled_channels: Mapped[dict] = mapped_column(JSONB, default=list)
+    quiet_hours: Mapped[dict] = mapped_column(JSONB, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship("User")
+
+
+class IntegrationConnection(Base):
+    __tablename__ = "integration_connections"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "provider", "display_name", name="uq_integration_name"
+        ),
+        Index("idx_integrations_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    auth_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    credential_reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    permissions: Mapped[dict] = mapped_column(JSONB, default=list)
+    allowed_resources: Mapped[dict] = mapped_column(JSONB, default=list)
+    allowed_agent_roles: Mapped[dict] = mapped_column(JSONB, default=list)
+    configuration: Mapped[dict] = mapped_column(JSONB, default=dict)
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="CONFIGURED"
+    )
+    created_by_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    connected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    created_by: Mapped["User"] = relationship("User")
+    usage_logs: Mapped[list["IntegrationUsageLog"]] = relationship(
+        "IntegrationUsageLog",
+        back_populates="connection",
+        cascade="all, delete-orphan",
+    )
+
+
+class IntegrationUsageLog(Base):
+    __tablename__ = "integration_usage_logs"
+    __table_args__ = (
+        Index("idx_integration_usage_created", "connection_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("integration_connections.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    agent_role: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    operation: Mapped[str] = mapped_column(String(100), nullable=False)
+    resource: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    execution_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    connection: Mapped["IntegrationConnection"] = relationship(
+        "IntegrationConnection", back_populates="usage_logs"
+    )
+    actor_user: Mapped["User | None"] = relationship("User")
