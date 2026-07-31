@@ -3,8 +3,12 @@
 import csv
 import io
 import ipaddress
+import json
+import re
 import socket
+import uuid
 import zipfile
+from datetime import date
 from html.parser import HTMLParser
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
@@ -18,13 +22,16 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import get_current_active_user
-from app.models.models import DocumentChunk, User
+from app.models.models import DocumentChunk, KnowledgeDocument, User
+from app.services.knowledge_storage import save_original_file
 from app.services.rag_service import hybrid_search_documents, ingest_document
 from app.services.notification_service import create_notification
 
 router = APIRouter(prefix="/documents", tags=["Knowledge Documents"])
 KB_MANAGERS = {"Owner", "Admin", "CEO", "Manager"}
 VALID_DEPARTMENTS = {"BOARD", "HR", "LEGAL", "IT", "FINANCE", "SALES", "ALL"}
+VALID_DOCUMENT_STATUSES = {"draft", "active", "inactive", "archived"}
+VALID_CONFIDENTIALITY = {"public", "internal", "confidential", "restricted"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
@@ -50,17 +57,43 @@ class RAGSearchRequest(BaseModel):
 
 class DocumentChunkResponse(BaseModel):
     id: str
+    tenant_id: str
+    department: str
+    document_type: str
+    document_id: str
+    document_title: str
     document_name: str
     section_title: str
     content: str
+    version: str
+    effective_date: Optional[str] = None
+    expiration_date: Optional[str] = None
+    status: str
+    confidentiality: str
+    allowed_roles: list[str] = Field(default_factory=list)
+    source_file: str
+    page: Optional[int] = None
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    content_hash: Optional[str] = None
+    embedding_model: str
+    embedding_version: str
     score: float
     citation_tag: str
 
 
 class DocumentUpdateRequest(BaseModel):
     document_name: Optional[str] = Field(None, min_length=1, max_length=255)
+    document_title: Optional[str] = Field(None, min_length=1, max_length=255)
+    document_type: Optional[str] = Field(None, min_length=1, max_length=50)
     collection_name: Optional[str] = Field(None, min_length=1, max_length=100)
     department_access: Optional[str] = None
+    version: Optional[str] = Field(None, min_length=1, max_length=50)
+    effective_date: Optional[date] = None
+    expiration_date: Optional[date] = None
+    status: Optional[str] = None
+    confidentiality: Optional[str] = None
+    allowed_roles: Optional[list[str]] = None
 
 
 class WebsiteImportRequest(BaseModel):
@@ -68,6 +101,117 @@ class WebsiteImportRequest(BaseModel):
     document_name: Optional[str] = Field(None, min_length=1, max_length=255)
     collection_name: str = Field(default="Website Imports", min_length=1, max_length=100)
     department_access: str = "ALL"
+    document_id: Optional[str] = Field(None, min_length=1, max_length=100)
+    document_title: Optional[str] = Field(None, min_length=1, max_length=255)
+    document_type: str = Field(default="webpage", min_length=1, max_length=50)
+    version: str = Field(default="1.0", min_length=1, max_length=50)
+    effective_date: Optional[date] = None
+    expiration_date: Optional[date] = None
+    status: str = "active"
+    confidentiality: str = "internal"
+    allowed_roles: list[str] = Field(default_factory=list)
+
+
+def _parse_allowed_roles(value: str | list[str] | None) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        roles = value
+    else:
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = [item for item in value.split(",")]
+        roles = decoded if isinstance(decoded, list) else [decoded]
+    normalized_roles = {
+        str(role).strip().strip("[]'\"").strip().lower()
+        for role in roles
+        if str(role).strip().strip("[]'\"").strip()
+    }
+    return sorted(normalized_roles)
+
+
+def _governance_metadata(
+    *,
+    status: str,
+    confidentiality: str,
+    allowed_roles: str | list[str] | None,
+    effective_date: date | None,
+    expiration_date: date | None,
+) -> dict[str, Any]:
+    normalized_status = status.strip().lower()
+    if normalized_status not in VALID_DOCUMENT_STATUSES:
+        raise HTTPException(status_code=422, detail="Unsupported document status")
+    normalized_confidentiality = confidentiality.strip().lower()
+    if normalized_confidentiality not in VALID_CONFIDENTIALITY:
+        raise HTTPException(status_code=422, detail="Unsupported confidentiality")
+    if effective_date and expiration_date and expiration_date < effective_date:
+        raise HTTPException(
+            status_code=422,
+            detail="expiration_date must be on or after effective_date",
+        )
+    normalized_roles = _parse_allowed_roles(allowed_roles)
+    if normalized_confidentiality == "restricted" and not normalized_roles:
+        raise HTTPException(
+            status_code=422,
+            detail="restricted documents require at least one allowed role",
+        )
+    return {
+        "status": normalized_status,
+        "confidentiality": normalized_confidentiality,
+        "allowed_roles": normalized_roles,
+        "effective_date": effective_date,
+        "expiration_date": expiration_date,
+    }
+
+
+def _set_document_processing_status(
+    db: Session,
+    *,
+    user: User,
+    document_id: str,
+    file_name: str,
+    document_title: str,
+    department: str,
+    document_type: str,
+    version: str,
+    governance: dict[str, Any],
+    processing_status: str,
+    storage_key: str | None = None,
+    source_hash: str | None = None,
+    source_url: str | None = None,
+    error_message: str | None = None,
+) -> KnowledgeDocument:
+    record = db.query(KnowledgeDocument).filter(
+        KnowledgeDocument.tenant_id == user.tenant_id,
+        KnowledgeDocument.document_id == document_id,
+        KnowledgeDocument.version == version,
+    ).first()
+    if not record:
+        record = KnowledgeDocument(
+            id=uuid.uuid4(),
+            tenant_id=user.tenant_id,
+            document_id=document_id,
+            created_by_id=user.id,
+        )
+        db.add(record)
+    record.file_name = file_name
+    record.document_title = document_title
+    record.department = department
+    record.document_type = document_type
+    record.version = version
+    record.status = governance["status"]
+    record.processing_status = processing_status
+    record.confidentiality = governance["confidentiality"]
+    record.allowed_roles = governance["allowed_roles"]
+    record.effective_date = governance["effective_date"]
+    record.expiration_date = governance["expiration_date"]
+    record.storage_key = storage_key or record.storage_key
+    record.source_hash = source_hash or record.source_hash
+    record.source_url = source_url
+    record.error_message = error_message
+    db.commit()
+    return record
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -75,20 +219,31 @@ class _HTMLTextExtractor(HTMLParser):
         super().__init__()
         self.parts: list[str] = []
         self._ignored_depth = 0
+        self._heading_prefix: str | None = None
 
     def handle_starttag(self, tag: str, attrs) -> None:
         if tag in {"script", "style", "noscript", "svg"}:
             self._ignored_depth += 1
-        elif tag in {"p", "div", "section", "article", "h1", "h2", "h3", "li", "br"}:
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self.parts.append("\n")
+            self._heading_prefix = f"{'#' * int(tag[1])} "
+        elif tag in {"p", "div", "section", "article", "li", "br"}:
             self.parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style", "noscript", "svg"} and self._ignored_depth:
             self._ignored_depth -= 1
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._heading_prefix = None
+            self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if not self._ignored_depth and data.strip():
-            self.parts.append(data.strip())
+            text = data.strip()
+            if self._heading_prefix:
+                text = f"{self._heading_prefix}{text}"
+                self._heading_prefix = None
+            self.parts.append(text)
 
     def text(self) -> str:
         return "\n".join(part for part in self.parts if part.strip())
@@ -118,16 +273,62 @@ def _visible_chunks_query(db: Session, current_user: User):
     )
 
 
+def _chunk_visible_to_user(chunk: DocumentChunk, current_user: User) -> bool:
+    if current_user.role in {"Owner", "Admin", "CEO"}:
+        return True
+    today = date.today()
+    if chunk.status != "active":
+        return False
+    if chunk.effective_date and chunk.effective_date > today:
+        return False
+    if chunk.expiration_date and chunk.expiration_date < today:
+        return False
+    principals = {current_user.role.lower(), current_user.department.lower()}
+    allowed_roles = {str(role).lower() for role in (chunk.allowed_roles or [])}
+    if allowed_roles and not principals.intersection(allowed_roles):
+        return False
+    return chunk.confidentiality != "restricted" or bool(allowed_roles)
+
+
+def _document_visible_to_user(document: KnowledgeDocument, current_user: User) -> bool:
+    if current_user.role in {"Owner", "Admin", "CEO"}:
+        return True
+    if document.department not in {"ALL", current_user.department}:
+        return False
+    today = date.today()
+    if document.status != "active" or document.processing_status != "ready":
+        return False
+    if document.effective_date and document.effective_date > today:
+        return False
+    if document.expiration_date and document.expiration_date < today:
+        return False
+    principals = {current_user.role.lower(), current_user.department.lower()}
+    allowed_roles = {str(role).lower() for role in (document.allowed_roles or [])}
+    return not allowed_roles or bool(principals.intersection(allowed_roles))
+
+
 def _extract_docx(data: bytes) -> str:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             xml = archive.read("word/document.xml")
         root = ElementTree.fromstring(xml)
         namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-        paragraphs = [
-            "".join(node.text or "" for node in paragraph.iter(f"{namespace}t"))
-            for paragraph in root.iter(f"{namespace}p")
-        ]
+        paragraphs: list[str] = []
+        for paragraph in root.iter(f"{namespace}p"):
+            paragraph_text = "".join(
+                node.text or "" for node in paragraph.iter(f"{namespace}t")
+            ).strip()
+            if not paragraph_text:
+                continue
+            style = paragraph.find(f"{namespace}pPr/{namespace}pStyle")
+            style_name = (
+                style.get(f"{namespace}val", "").lower() if style is not None else ""
+            )
+            heading_match = re.match(r"heading(\d+)", style_name)
+            if heading_match:
+                level = min(int(heading_match.group(1)), 6)
+                paragraph_text = f"{'#' * level} {paragraph_text}"
+            paragraphs.append(paragraph_text)
         return "\n".join(text for text in paragraphs if text.strip())
     except (KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
         raise HTTPException(status_code=422, detail="Invalid DOCX file") from exc
@@ -140,7 +341,10 @@ def _extract_pdf(data: bytes) -> str:
         raise HTTPException(status_code=503, detail="PDF parser is not installed") from exc
     try:
         reader = PdfReader(io.BytesIO(data))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
+        return "\n\n".join(
+            f"[[PAGE:{page_number}]]\n{page.extract_text() or ''}"
+            for page_number, page in enumerate(reader.pages, start=1)
+        )
     except Exception as exc:
         raise HTTPException(status_code=422, detail="Invalid or encrypted PDF file") from exc
 
@@ -214,22 +418,72 @@ def list_documents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> list[dict[str, Any]]:
-    chunks = _visible_chunks_query(db, current_user).order_by(
-        DocumentChunk.created_at.desc()
-    ).all()
-    docs: dict[str, dict[str, Any]] = {}
+    chunks = [
+        chunk
+        for chunk in _visible_chunks_query(db, current_user).order_by(
+            DocumentChunk.created_at.desc()
+        ).all()
+        if _chunk_visible_to_user(chunk, current_user)
+    ]
+    records = [
+        document
+        for document in db.query(KnowledgeDocument).filter(
+            KnowledgeDocument.tenant_id == current_user.tenant_id,
+            KnowledgeDocument.status == "active",
+        ).order_by(KnowledgeDocument.created_at.desc()).all()
+        if _document_visible_to_user(document, current_user)
+    ]
+    docs: dict[str, dict[str, Any]] = {
+        document.document_id: {
+            "document_id": document.document_id,
+            "document_name": document.file_name,
+            "document_title": document.document_title,
+            "document_type": document.document_type,
+            "version": document.version,
+            "collection_name": "General Knowledge",
+            "department_access": document.department,
+            "effective_date": (
+                document.effective_date.isoformat() if document.effective_date else None
+            ),
+            "expiration_date": (
+                document.expiration_date.isoformat() if document.expiration_date else None
+            ),
+            "document_status": document.status,
+            "processing_status": document.processing_status,
+            "confidentiality": document.confidentiality,
+            "allowed_roles": document.allowed_roles or [],
+            "source_file": document.file_name,
+            "storage_key": document.storage_key,
+            "chunk_count": document.chunk_count,
+            "status": document.processing_status.upper(),
+            "created_at": document.created_at.isoformat() if document.created_at else None,
+            "error_message": document.error_message,
+        }
+        for document in records
+    }
+    record_keys = set(docs)
     for chunk in chunks:
         key = chunk.document_id or chunk.document_name
         item = docs.setdefault(key, {
             "document_id": key,
             "document_name": chunk.document_name,
+            "document_title": chunk.document_title or chunk.document_name,
+            "document_type": chunk.document_type,
+            "version": chunk.version,
             "collection_name": chunk.collection_name,
             "department_access": chunk.department_access,
+            "effective_date": chunk.effective_date.isoformat() if chunk.effective_date else None,
+            "expiration_date": chunk.expiration_date.isoformat() if chunk.expiration_date else None,
+            "document_status": chunk.status,
+            "confidentiality": chunk.confidentiality,
+            "allowed_roles": chunk.allowed_roles or [],
+            "source_file": chunk.source_file or chunk.document_name,
             "chunk_count": 0,
             "status": "INDEXED",
             "created_at": chunk.created_at.isoformat() if chunk.created_at else None,
         })
-        item["chunk_count"] += 1
+        if key not in record_keys:
+            item["chunk_count"] += 1
     return list(docs.values())
 
 
@@ -249,6 +503,8 @@ def search_rag(
         ),
         top_k=req.top_k,
         collections=req.collections,
+        user_role=current_user.role,
+        user_department=current_user.department,
     )
     return [DocumentChunkResponse(**result) for result in results]
 
@@ -259,12 +515,29 @@ def ingest_text_document(
     content: str = Form(...),
     department_access: str = Form("ALL"),
     collection_name: str = Form("General Knowledge"),
+    document_id: Optional[str] = Form(None),
+    document_title: Optional[str] = Form(None),
+    document_type: str = Form("knowledge"),
+    version: str = Form("1.0"),
+    effective_date: Optional[date] = Form(None),
+    expiration_date: Optional[date] = Form(None),
+    status: str = Form("active"),
+    confidentiality: str = Form("internal"),
+    allowed_roles: str = Form(""),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> dict:
     department = _validate_management(current_user, department_access)
     if not document_name.strip() or not content.strip():
         raise HTTPException(status_code=400, detail="Document name and content are required")
+    governance = _governance_metadata(
+        status=status,
+        confidentiality=confidentiality,
+        allowed_roles=allowed_roles,
+        effective_date=effective_date,
+        expiration_date=expiration_date,
+    )
+    resolved_document_id = document_id.strip() if document_id else document_name.strip()
     chunks = ingest_document(
         db=db,
         tenant_id=current_user.tenant_id,
@@ -272,33 +545,95 @@ def ingest_text_document(
         content=content,
         department_access=department,
         collection_name=collection_name.strip() or "General Knowledge",
+        document_id=resolved_document_id,
+        document_title=document_title.strip() if document_title else document_name.strip(),
+        document_type=document_type.strip().lower(),
+        version=version.strip(),
+        source_file=document_name.strip(),
+        created_by_id=current_user.id,
+        **governance,
     )
     _notify_indexed(db, current_user, document_name.strip(), len(chunks))
     return {
         "success": True,
-        "document_id": document_name.strip(),
+        "document_id": resolved_document_id,
         "document_name": document_name.strip(),
         "status": "INDEXED",
+        "processing_status": "ready",
+        "embedding_model": chunks[0].embedding_model if chunks else None,
         "chunks_created": len(chunks),
     }
 
 
 @router.post("/upload", status_code=201, summary="Upload PDF, DOCX, TXT or CSV")
-async def upload_document(
+def upload_document(
     file: UploadFile = File(...),
     department_access: str = Form("ALL"),
     collection_name: str = Form("General Knowledge"),
+    document_id: Optional[str] = Form(None),
+    document_title: Optional[str] = Form(None),
+    document_type: str = Form("knowledge"),
+    version: str = Form("1.0"),
+    effective_date: Optional[date] = Form(None),
+    expiration_date: Optional[date] = Form(None),
+    status: str = Form("active"),
+    confidentiality: str = Form("internal"),
+    allowed_roles: str = Form(""),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> dict:
     department = _validate_management(current_user, department_access)
-    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    # This endpoint performs PDF parsing and local model inference. Keeping the
+    # handler synchronous lets FastAPI run it in its worker thread pool instead
+    # of blocking the async event loop for the duration of embedding.
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File exceeds the 10 MB limit")
     filename = (file.filename or "document").strip()
-    content = _extract_file_text(filename, data).strip()
-    if not content:
-        raise HTTPException(status_code=422, detail="No readable text found in the file")
+    governance = _governance_metadata(
+        status=status,
+        confidentiality=confidentiality,
+        allowed_roles=allowed_roles,
+        effective_date=effective_date,
+        expiration_date=expiration_date,
+    )
+    resolved_document_id = document_id.strip() if document_id else filename
+    resolved_title = document_title.strip() if document_title else filename
+    resolved_type = document_type.strip().lower()
+    resolved_version = version.strip()
+    try:
+        storage_key, source_hash = save_original_file(
+            tenant_id=current_user.tenant_id,
+            document_id=resolved_document_id,
+            version=resolved_version,
+            filename=filename,
+            data=data,
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not store uploaded file") from exc
+    record = _set_document_processing_status(
+        db,
+        user=current_user,
+        document_id=resolved_document_id,
+        file_name=filename,
+        document_title=resolved_title,
+        department=department,
+        document_type=resolved_type,
+        version=resolved_version,
+        governance=governance,
+        processing_status="parsing",
+        storage_key=storage_key,
+        source_hash=source_hash,
+    )
+    try:
+        content = _extract_file_text(filename, data).strip()
+        if not content:
+            raise HTTPException(status_code=422, detail="No readable text found in the file")
+    except Exception as exc:
+        record.processing_status = "failed"
+        record.error_message = str(exc)[:2000]
+        db.commit()
+        raise
     chunks = ingest_document(
         db=db,
         tenant_id=current_user.tenant_id,
@@ -306,13 +641,25 @@ async def upload_document(
         content=content,
         department_access=department,
         collection_name=collection_name.strip() or "General Knowledge",
+        document_id=resolved_document_id,
+        document_title=resolved_title,
+        document_type=resolved_type,
+        version=resolved_version,
+        source_file=filename,
+        storage_key=storage_key,
+        source_hash=source_hash,
+        created_by_id=current_user.id,
+        **governance,
     )
     _notify_indexed(db, current_user, filename, len(chunks))
     return {
         "success": True,
-        "document_id": filename,
+        "document_id": resolved_document_id,
         "document_name": filename,
         "status": "INDEXED",
+        "processing_status": "ready",
+        "storage_key": storage_key,
+        "embedding_model": chunks[0].embedding_model if chunks else None,
         "chunks_created": len(chunks),
     }
 
@@ -325,12 +672,48 @@ def import_website(
 ) -> dict:
     department = _validate_management(current_user, req.department_access)
     final_url, html = _download_public_html(str(req.url))
-    parser = _HTMLTextExtractor()
-    parser.feed(html)
-    content = parser.text().strip()
-    if not content:
-        raise HTTPException(status_code=422, detail="No readable text found on website")
     name = req.document_name or urlparse(final_url).hostname or "website"
+    governance = _governance_metadata(
+        status=req.status,
+        confidentiality=req.confidentiality,
+        allowed_roles=req.allowed_roles,
+        effective_date=req.effective_date,
+        expiration_date=req.expiration_date,
+    )
+    resolved_document_id = req.document_id or name
+    storage_key, source_hash = save_original_file(
+        tenant_id=current_user.tenant_id,
+        document_id=resolved_document_id,
+        version=req.version,
+        filename=f"{name}.html",
+        data=html.encode("utf-8"),
+    )
+    record = _set_document_processing_status(
+        db,
+        user=current_user,
+        document_id=resolved_document_id,
+        file_name=f"{name}.html",
+        document_title=req.document_title or name,
+        department=department,
+        document_type=req.document_type.strip().lower(),
+        version=req.version.strip(),
+        governance=governance,
+        processing_status="parsing",
+        storage_key=storage_key,
+        source_hash=source_hash,
+        source_url=final_url,
+    )
+    try:
+        parser = _HTMLTextExtractor()
+        parser.feed(html)
+        content = parser.text().strip()
+        if not content:
+            raise HTTPException(status_code=422, detail="No readable text found on website")
+    except Exception as exc:
+        record.processing_status = "failed"
+        record.error_message = str(exc)[:2000]
+        db.commit()
+        raise
     chunks = ingest_document(
         db=db,
         tenant_id=current_user.tenant_id,
@@ -339,14 +722,27 @@ def import_website(
         department_access=department,
         collection_name=req.collection_name,
         source_metadata={"source_type": "WEBSITE", "source_url": final_url},
+        document_id=resolved_document_id,
+        document_title=req.document_title or name,
+        document_type=req.document_type.strip().lower(),
+        version=req.version.strip(),
+        source_file=final_url,
+        storage_key=storage_key,
+        source_hash=source_hash,
+        source_url=final_url,
+        created_by_id=current_user.id,
+        **governance,
     )
     _notify_indexed(db, current_user, name, len(chunks))
     return {
         "success": True,
-        "document_id": name,
+        "document_id": resolved_document_id,
         "document_name": name,
         "source_url": final_url,
         "status": "INDEXED",
+        "processing_status": "ready",
+        "storage_key": storage_key,
+        "embedding_model": chunks[0].embedding_model if chunks else None,
         "chunks_created": len(chunks),
     }
 
@@ -367,20 +763,80 @@ def update_document(
             DocumentChunk.document_name == document_id,
         ),
     ).all()
-    if not chunks:
+    records = db.query(KnowledgeDocument).filter(
+        KnowledgeDocument.tenant_id == current_user.tenant_id,
+        KnowledgeDocument.document_id == document_id,
+    ).all()
+    if not chunks and not records:
         raise HTTPException(status_code=404, detail="Document not found")
     if current_user.role == "Manager" and any(
         chunk.department_access not in {"ALL", current_user.department} for chunk in chunks
     ):
         raise HTTPException(status_code=403, detail="Manager cannot edit this document")
     data = req.model_dump(exclude_unset=True)
+    if "version" in data:
+        raise HTTPException(
+            status_code=409,
+            detail="Upload a new document version instead of editing version in place",
+        )
     if "department_access" in data:
         data["department_access"] = _validate_management(
             current_user, data["department_access"]
         )
+    governance_fields = {
+        "status",
+        "confidentiality",
+        "allowed_roles",
+        "effective_date",
+        "expiration_date",
+    }
+    if governance_fields.intersection(data):
+        governance_source = chunks[0] if chunks else records[0]
+        governance = _governance_metadata(
+            status=data.get("status") or governance_source.status,
+            confidentiality=data.get(
+                "confidentiality", governance_source.confidentiality
+            ),
+            allowed_roles=data.get("allowed_roles", governance_source.allowed_roles),
+            effective_date=data.get("effective_date", governance_source.effective_date),
+            expiration_date=data.get(
+                "expiration_date", governance_source.expiration_date
+            ),
+        )
+        data.update(governance)
     for chunk in chunks:
         for field_name, value in data.items():
             setattr(chunk, field_name, value)
+        metadata = dict(chunk.metadata_ or {})
+        for field_name in data.keys() & {
+            "document_title",
+            "document_type",
+            "version",
+            "effective_date",
+            "expiration_date",
+            "status",
+            "confidentiality",
+            "allowed_roles",
+        }:
+            value = data[field_name]
+            metadata[field_name] = value.isoformat() if isinstance(value, date) else value
+        chunk.metadata_ = metadata
+    record_field_map = {
+        "document_name": "file_name",
+        "document_title": "document_title",
+        "document_type": "document_type",
+        "department_access": "department",
+        "effective_date": "effective_date",
+        "expiration_date": "expiration_date",
+        "status": "status",
+        "confidentiality": "confidentiality",
+        "allowed_roles": "allowed_roles",
+    }
+    for record in records:
+        for field_name, value in data.items():
+            record_field = record_field_map.get(field_name)
+            if record_field:
+                setattr(record, record_field, value)
     db.commit()
     return {"message": "Document updated successfully", "chunks_updated": len(chunks)}
 
@@ -400,7 +856,11 @@ def delete_document(
             DocumentChunk.document_name == document_id,
         ),
     ).all()
-    if not chunks:
+    records = db.query(KnowledgeDocument).filter(
+        KnowledgeDocument.tenant_id == current_user.tenant_id,
+        KnowledgeDocument.document_id == document_id,
+    ).all()
+    if not chunks and not records:
         raise HTTPException(status_code=404, detail="Document not found")
     if current_user.role == "Manager" and any(
         chunk.department_access not in {"ALL", current_user.department} for chunk in chunks
@@ -408,5 +868,7 @@ def delete_document(
         raise HTTPException(status_code=403, detail="Manager cannot delete this document")
     for chunk in chunks:
         db.delete(chunk)
+    for record in records:
+        db.delete(record)
     db.commit()
     return {"message": "Document deleted successfully", "chunks_deleted": len(chunks)}

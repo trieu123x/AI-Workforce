@@ -197,12 +197,22 @@ def execute_support_case(db: Session, case_id: uuid.UUID) -> str:
                 }
             elif step.step_key == "retrieve_policy":
                 results = hybrid_search_documents(
-                    db, case.tenant_id, case.inbound_body, department="ALL", top_k=4
+                    db,
+                    case.tenant_id,
+                    case.inbound_body,
+                    department="ALL",
+                    top_k=4,
+                    user_role="customer_support",
                 )
                 case.citations = [
                     {
+                        "chunk_id": item["id"],
+                        "document_id": item["document_id"],
                         "document_name": item["document_name"],
+                        "document_title": item["document_title"],
                         "section_title": item["section_title"],
+                        "version": item["version"],
+                        "page": item["page"],
                         "score": item["score"],
                     }
                     for item in results

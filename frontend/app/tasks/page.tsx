@@ -37,6 +37,7 @@ interface TaskItem {
   priority: string;
   due_date: string | null;
   status: string;
+  allowed_transitions?: string[];
   comments_count: number;
   created_at: string;
 }
@@ -53,6 +54,10 @@ interface UserMember {
   full_name: string;
   email: string;
   role: string;
+}
+
+interface PaginatedUsersResponse {
+  items: UserMember[];
 }
 
 interface TaskCommentItem {
@@ -73,6 +78,40 @@ const KANBAN_COLUMNS = [
   { key: "WAITING_APPROVAL", title: "Chờ Phê Duyệt", color: "#F59E0B", bg: "#FEF3C7" },
   { key: "COMPLETED", title: "Hoàn Thành", color: "#10B981", bg: "#ECFDF5" },
 ];
+
+const TASK_TRANSITIONS: Record<string, string[]> = {
+  DRAFT: ["PENDING", "CANCELLED"],
+  PENDING: ["RUNNING", "CANCELLED", "OVERDUE"],
+  RUNNING: ["WAITING_APPROVAL", "COMPLETED", "FAILED", "CANCELLED", "OVERDUE"],
+  WAITING_APPROVAL: ["RUNNING", "COMPLETED", "FAILED", "CANCELLED", "OVERDUE"],
+  FAILED: ["PENDING", "CANCELLED"],
+  OVERDUE: ["RUNNING", "COMPLETED", "CANCELLED"],
+  COMPLETED: [],
+  CANCELLED: [],
+};
+
+const TASK_STATUS_LABELS: Record<string, string> = {
+  DRAFT: "Draft",
+  PENDING: "Pending",
+  RUNNING: "Running",
+  WAITING_APPROVAL: "Waiting Approval",
+  COMPLETED: "Completed",
+  FAILED: "Failed",
+  CANCELLED: "Cancelled",
+  OVERDUE: "Overdue",
+};
+
+function getAllowedTransitions(task: TaskItem): string[] {
+  return task.allowed_transitions ?? TASK_TRANSITIONS[task.status] ?? [];
+}
+
+function getStatusOptions(task: TaskItem): string[] {
+  return [task.status, ...getAllowedTransitions(task).filter((status) => status !== task.status)];
+}
+
+function canTransition(task: TaskItem, nextStatus: string): boolean {
+  return nextStatus === task.status || getAllowedTransitions(task).includes(nextStatus);
+}
 
 export default function TaskManagementPage() {
   const router = useRouter();
@@ -128,12 +167,12 @@ export default function TaskManagementPage() {
       const [tasksRes, agentsRes, usersRes] = await Promise.allSettled([
         api.get("/api/v1/tasks"),
         api.get("/api/v1/agents"),
-        api.get("/api/v1/users-mgmt"),
+        api.get<PaginatedUsersResponse>("/api/v1/users-mgmt", { params: { page: 1, page_size: 100 } }),
       ]);
 
       if (tasksRes.status === "fulfilled") setTasks(tasksRes.value.data);
       if (agentsRes.status === "fulfilled") setAgents(agentsRes.value.data);
-      if (usersRes.status === "fulfilled") setUsersList(usersRes.value.data);
+      if (usersRes.status === "fulfilled") setUsersList(usersRes.value.data.items);
     } catch (err) {
       console.error("Failed to fetch task management data:", err);
     } finally {
@@ -235,8 +274,8 @@ export default function TaskManagementPage() {
   // ── Open Delete Confirmation ──
   const handleOpenDelete = (task: TaskItem, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    if (task.status !== "DRAFT") {
-      alert("Chỉ task DRAFT mới được xóa. Với task đang chạy, hãy chuyển sang CANCELLED.");
+    if (!["DRAFT", "COMPLETED"].includes(task.status)) {
+      alert("Chỉ task DRAFT hoặc COMPLETED mới được xóa. Với task đang xử lý, hãy chuyển sang CANCELLED.");
       return;
     }
     setActiveTask(task);
@@ -289,6 +328,11 @@ export default function TaskManagementPage() {
 
   // ── Status Select Update (Inline) ──
   const handleUpdateStatus = async (taskId: string, nextStatus: string) => {
+    const task = tasks.find((item) => item.id === taskId);
+    if (!task || !canTransition(task, nextStatus)) {
+      alert(`Không thể chuyển task từ ${task?.status ?? "trạng thái hiện tại"} sang ${nextStatus}.`);
+      return;
+    }
     try {
       setTasks((prev) =>
         prev.map((t) => (t.id === taskId ? { ...t, status: nextStatus } : t))
@@ -356,6 +400,11 @@ export default function TaskManagementPage() {
 
     const draggedTask = tasks[draggedTaskIndex];
     const statusChanged = draggedTask.status !== targetColumnKey;
+
+    if (statusChanged && !canTransition(draggedTask, targetColumnKey)) {
+      alert(`Không thể chuyển task từ ${draggedTask.status} sang ${targetColumnKey}.`);
+      return;
+    }
 
     const updatedTask = { ...draggedTask, status: targetColumnKey };
     const remainingTasks = tasks.filter((t) => t.id !== taskId);
@@ -584,7 +633,7 @@ export default function TaskManagementPage() {
                         return (
                           <div
                             key={task.id}
-                            draggable
+                            draggable={getAllowedTransitions(task).length > 0}
                             onDragStart={(e) => handleDragStart(e, task.id)}
                             onDragOver={(e) => handleDragOverCard(e, task.id)}
                             onDragLeave={(e) => handleDragLeaveCard(e, task.id)}
@@ -594,7 +643,7 @@ export default function TaskManagementPage() {
                             style={{
                               padding: "14px",
                               borderRadius: "10px",
-                              cursor: "grab",
+                              cursor: getAllowedTransitions(task).length > 0 ? "grab" : "default",
                               opacity: isDraggingThis ? 0.4 : 1,
                               border: isDragOverThis ? "2px solid var(--primary)" : "1px solid var(--border)",
                               boxShadow: isDraggingThis
@@ -667,11 +716,9 @@ export default function TaskManagementPage() {
                                 onClick={(e) => e.stopPropagation()}
                                 style={{ fontSize: "0.72rem", padding: "2px 6px", borderRadius: "4px", border: "1px solid var(--border)", background: "#FFF" }}
                               >
-                                <option value="DRAFT">Draft</option>
-                                <option value="PENDING">Pending</option>
-                                <option value="RUNNING">Running</option>
-                                <option value="WAITING_APPROVAL">Approval</option>
-                                <option value="COMPLETED">Completed</option>
+                                {getStatusOptions(task).map((status) => (
+                                  <option key={status} value={status}>{TASK_STATUS_LABELS[status] ?? status}</option>
+                                ))}
                               </select>
                             </div>
                           </div>
@@ -730,11 +777,9 @@ export default function TaskManagementPage() {
                           onChange={(e) => handleUpdateStatus(t.id, e.target.value)}
                           style={{ fontSize: "0.78rem", padding: "4px 8px", borderRadius: "6px", border: "1px solid var(--border)" }}
                         >
-                          <option value="DRAFT">Draft</option>
-                          <option value="PENDING">Pending</option>
-                          <option value="RUNNING">Running</option>
-                          <option value="WAITING_APPROVAL">Waiting Approval</option>
-                          <option value="COMPLETED">Completed</option>
+                          {getStatusOptions(t).map((status) => (
+                            <option key={status} value={status}>{TASK_STATUS_LABELS[status] ?? status}</option>
+                          ))}
                         </select>
                       </td>
                       <td style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
@@ -821,7 +866,6 @@ export default function TaskManagementPage() {
                   <select className="ta-input" value={formStatus} onChange={(e) => setFormStatus(e.target.value)}>
                     <option value="DRAFT">DRAFT (Nháp)</option>
                     <option value="PENDING">PENDING (Chờ xử lý)</option>
-                    <option value="RUNNING">RUNNING (Đang chạy)</option>
                   </select>
                 </div>
               </div>
@@ -909,11 +953,9 @@ export default function TaskManagementPage() {
                 <div>
                   <label style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--text-dark)", marginBottom: "4px", display: "block" }}>Trạng Thái Task</label>
                   <select className="ta-input" value={formStatus} onChange={(e) => setFormStatus(e.target.value)}>
-                    <option value="DRAFT">DRAFT</option>
-                    <option value="PENDING">PENDING</option>
-                    <option value="RUNNING">RUNNING</option>
-                    <option value="WAITING_APPROVAL">WAITING_APPROVAL</option>
-                    <option value="COMPLETED">COMPLETED</option>
+                    {getStatusOptions(activeTask).map((status) => (
+                      <option key={status} value={status}>{status}</option>
+                    ))}
                   </select>
                 </div>
               </div>

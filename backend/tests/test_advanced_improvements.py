@@ -25,14 +25,26 @@ def test_langgraph_engine_transitions():
 
 
 def test_reranker_service():
-    """Test Cross-Encoder candidate chunk re-ranking."""
+    """Test relevance gating and hybrid candidate re-ranking."""
     candidates = [
-        {"content": "Chính sách quy định số ngày nghỉ phép năm 2025 là 12 ngày", "score": 0.6},
-        {"content": "Phụ cấp đi lại công tác phí tối đa 500k", "score": 0.4},
+        {
+            "content": "Chính sách quy định số ngày nghỉ phép năm 2025 là 12 ngày",
+            "score": 1.0,
+            "_rrf_score": 1.0,
+            "_dense_score": 0.75,
+            "_sparse_score": 1.0,
+        },
+        {
+            "content": "Phụ cấp đi lại công tác phí tối đa 500k",
+            "score": 0.8,
+            "_rrf_score": 0.8,
+            "_dense_score": 0.30,
+            "_sparse_score": 0.0,
+        },
     ]
     reranked = rerank_chunks("nghỉ phép bao nhiêu ngày", candidates, top_k=2)
-    assert len(reranked) > 0
-    assert reranked[0]["rerank_score"] > reranked[-1]["rerank_score"]
+    assert len(reranked) == 1
+    assert reranked[0]["score"] == reranked[0]["rerank_score"]
 
 
 def test_ocr_document_parser():

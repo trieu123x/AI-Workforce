@@ -750,7 +750,7 @@ export default function DashboardPage() {
                   👋
                 </h1>
                 <p style={{ color: "var(--text-muted)", fontSize: "0.875rem", marginTop: "4px" }}>
-                  Tổng quan hoạt động Chatbot & Nhân viên của tổ chức hôm nay.
+                  Tổng quan hoạt động Chatbot & Nhân viên của tổ chức {activeTab === "day" ? "hôm nay" : activeTab === "week" ? "trong 7 ngày gần nhất" : "trong tháng này"}.
                 </p>
               </div>
 

@@ -1,0 +1,70 @@
+CÔNG TY CỔ PHẦN CÔNG NGHỆ NOVASOFT
+CHÍNH SÁCH KIỂM SOÁT TRUY CẬP VÀ SỬ DỤNG DỮ LIỆU
+Mã: SEC-POL-003 | Phiên bản: 1.0 | Hiệu lực: 01/08/2026
+Chủ sở hữu: Security/IT | Bảo mật: Internal Restricted
+
+1. MỤC ĐÍCH
+Thiết lập nguyên tắc cấp quyền, sử dụng, giám sát và thu hồi quyền truy cập đối với hệ thống, dữ liệu, mã nguồn và kho tri thức của NovaSoft.
+
+2. NGUYÊN TẮC
+- Least privilege: chỉ cấp quyền tối thiểu cần thiết.
+- Need-to-know: chỉ truy cập dữ liệu cần cho nhiệm vụ.
+- Separation of duties: người tạo, người phê duyệt và người kiểm tra không nên là cùng một người trong nghiệp vụ rủi ro cao.
+- Deny by default: mặc định từ chối nếu không có quyền rõ ràng.
+- Traceability: hành động nhạy cảm phải có audit log.
+
+3. PHÂN LOẠI DỮ LIỆU
+PUBLIC: có thể công bố.
+INTERNAL: dùng trong công ty.
+CONFIDENTIAL: hợp đồng, báo giá, hồ sơ khách hàng, tài chính.
+RESTRICTED: dữ liệu cá nhân, bảng lương, secret, lỗ hổng, dữ liệu production.
+
+4. ACL CHO KNOWLEDGE BASE
+Quyền được kiểm tra trước retrieval theo tenant_id, collection_id, department, project, role, user và document_acl.
+Không được retrieval toàn bộ rồi mới lọc kết quả.
+Chunk kế thừa ACL từ tài liệu gốc và không được nới rộng quyền.
+Tài liệu thuộc dự án A không mặc định hiển thị cho người thuộc dự án B.
+
+5. TÀI KHOẢN VÀ XÁC THỰC
+- Mỗi người dùng một tài khoản riêng.
+- Bắt buộc MFA cho email, cloud, repository và hệ thống quản trị.
+- Không chia sẻ mật khẩu, token hoặc mã OTP.
+- Tài khoản đặc quyền phải được rà soát tối thiểu hàng quý.
+
+6. SECRET VÀ KHÓA TRUY CẬP
+Không đưa API key, private key, mật khẩu, connection string hoặc token vào Git, tài liệu RAG, email hoặc chat công khai.
+Secret phải lưu trong secret manager hoặc biến môi trường được kiểm soát.
+Nếu nghi ngờ lộ secret, phải thu hồi và xoay vòng ngay.
+
+7. QUYỀN TRUY CẬP NHÂN SỰ
+Nhân viên xem được chính sách chung và dữ liệu của chính mình.
+Quản lý chỉ xem dữ liệu của nhân sự thuộc phạm vi quản lý khi có mục đích hợp lệ.
+HR được xem hồ sơ nhân sự theo phân quyền công việc.
+Dữ liệu sức khỏe, lương, đánh giá và kỷ luật thuộc nhóm RESTRICTED.
+
+8. AI VÀ RAG
+- Prompt và context chỉ chứa dữ liệu người dùng có quyền xem.
+- Không gửi dữ liệu CONFIDENTIAL/RESTRICTED tới nhà cung cấp AI chưa được phê duyệt.
+- Câu trả lời phải kèm nguồn, phiên bản và trạng thái tài liệu.
+- Tài liệu DRAFT không được trình bày như quy định đã có hiệu lực.
+- Câu hỏi pháp lý, kỷ luật, lương hoặc bảo mật rủi ro cao phải chuyển người có thẩm quyền phê duyệt.
+
+9. CẤP VÀ THU HỒI QUYỀN
+Yêu cầu cấp quyền phải có người đề nghị, phạm vi, lý do, thời hạn và người phê duyệt.
+Khi nhân viên chuyển dự án hoặc nghỉ việc, quyền phải được cập nhật/thu hồi theo checklist trong ngày hiệu lực.
+Quyền tạm thời phải có ngày hết hạn.
+
+10. GIÁM SÁT VÀ AUDIT LOG
+Ghi tối thiểu: user_id, action, resource_id, timestamp, result, source_ip/session và correlation_id.
+Audit log không được chứa password hoặc secret thô.
+Các hành động tải hàng loạt, chia sẻ tài liệu, thay đổi ACL và xuất dữ liệu phải được cảnh báo.
+
+11. XỬ LÝ SỰ CỐ
+Người dùng phải báo ngay cho Security/IT khi: mất thiết bị, nhận email lừa đảo, lộ thông tin, phát hiện truy cập lạ hoặc gửi nhầm dữ liệu.
+Security phân loại mức độ, cô lập, bảo toàn log, khắc phục và lập báo cáo sau sự cố.
+
+12. VI PHẠM
+Vi phạm được xử lý theo nội quy, hợp đồng và pháp luật; mức độ phụ thuộc vào ý chí, hậu quả, phạm vi dữ liệu và khả năng khắc phục.
+
+13. RÀ SOÁT
+Chính sách được rà soát tối thiểu mỗi 12 tháng hoặc khi có thay đổi lớn về hệ thống, pháp luật hay mô hình xử lý dữ liệu.

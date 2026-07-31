@@ -32,6 +32,10 @@ TRANSITIONS = {
     "COMPLETED": set(),
     "CANCELLED": set(),
 }
+TASK_STATUS_ORDER = [
+    "DRAFT", "PENDING", "RUNNING", "WAITING_APPROVAL",
+    "COMPLETED", "FAILED", "CANCELLED", "OVERDUE",
+]
 
 
 class TaskCreateRequest(BaseModel):
@@ -155,6 +159,7 @@ def _add_history(
 
 
 def _serialize_task(task: Task) -> dict[str, Any]:
+    effective_status = _effective_status(task)
     return {
         "id": str(task.id),
         "title": task.title,
@@ -173,7 +178,12 @@ def _serialize_task(task: Task) -> dict[str, Any]:
         ),
         "priority": task.priority,
         "due_date": task.due_date.isoformat() if task.due_date else None,
-        "status": _effective_status(task),
+        "status": effective_status,
+        "allowed_transitions": [
+            status
+            for status in TASK_STATUS_ORDER
+            if status in TRANSITIONS[effective_status]
+        ],
         "comments_count": len(task.comments),
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "updated_at": task.updated_at.isoformat() if task.updated_at else None,
@@ -349,7 +359,7 @@ def add_task_comment(
     return {"message": "Comment added successfully"}
 
 
-@router.delete("/{task_id}", summary="Delete a draft task")
+@router.delete("/{task_id}", summary="Delete a draft or completed task")
 def delete_task(
     task_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -358,8 +368,21 @@ def delete_task(
     task = _get_visible_task(db, current_user, task_id)
     if current_user.role not in PRIVILEGED_ROLES and task.creator_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the creator or Admin can delete this task")
-    if task.status != "DRAFT":
-        raise HTTPException(status_code=409, detail="Only DRAFT tasks can be deleted; cancel active tasks instead")
+    if task.status not in {"DRAFT", "COMPLETED"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Only DRAFT or COMPLETED tasks can be deleted; "
+                "cancel active tasks instead"
+            ),
+        )
+    _add_history(
+        db,
+        task,
+        current_user,
+        "task_deleted",
+        {"status": task.status, "title": task.title},
+    )
     db.delete(task)
     db.commit()
     return {"message": "Task deleted successfully"}

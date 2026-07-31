@@ -3,6 +3,7 @@ Dashboard & Analytics API router — Returns real statistics from Database.
 """
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List
 from io import BytesIO
 
@@ -12,7 +13,15 @@ from sqlalchemy import func
 
 from app.core.database import get_db
 from app.core.security import get_current_active_user, get_current_user
-from app.models.models import User, AIAgent, AgentWorkflow, WorkflowApproval, AuditLog
+from app.models.models import (
+    User,
+    AIAgent,
+    AgentWorkflow,
+    WorkflowApproval,
+    AuditLog,
+    ChatConversation,
+    ChatMessage,
+)
 
 from app.services.auth_service import ensure_tenant_default_agents
 
@@ -28,6 +37,109 @@ ROLE_DEPT_MAP = {
     "SALES": "Sales & Marketing",
 }
 
+DASHBOARD_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
+
+
+def _period_bounds(period: str, now: datetime | None = None) -> tuple[datetime, datetime, datetime]:
+    """Return selected-period UTC bounds and the current local dashboard time."""
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now_local = now_utc.astimezone(DASHBOARD_TIMEZONE)
+    today_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if period == "day":
+        start_local = today_local
+    elif period == "week":
+        start_local = today_local - timedelta(days=6)
+    else:
+        start_local = today_local.replace(day=1)
+
+    return start_local.astimezone(timezone.utc), now_utc, now_local
+
+
+def _month_start(value: datetime, offset: int = 0) -> datetime:
+    """Shift an aware datetime to the first day of a calendar month."""
+    month_index = value.year * 12 + value.month - 1 + offset
+    year, zero_based_month = divmod(month_index, 12)
+    return value.replace(
+        year=year,
+        month=zero_based_month + 1,
+        day=1,
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _build_usage_trend(
+    db: Session,
+    tenant_id,
+    period: str,
+    period_start: datetime,
+    period_end: datetime,
+    now_local: datetime,
+) -> List[Dict[str, Any]]:
+    """Build period-aware usage buckets in Vietnam local time."""
+    assistant_times = [
+        row[0]
+        for row in db.query(ChatMessage.created_at)
+        .join(ChatConversation, ChatMessage.conversation_id == ChatConversation.id)
+        .filter(
+            ChatConversation.tenant_id == tenant_id,
+            ChatMessage.sender == "ASSISTANT",
+            ChatMessage.created_at >= period_start,
+            ChatMessage.created_at <= period_end,
+        )
+        .all()
+    ]
+    handoff_times = [
+        row[0]
+        for row in db.query(WorkflowApproval.updated_at)
+        .join(AgentWorkflow)
+        .filter(
+            AgentWorkflow.tenant_id == tenant_id,
+            WorkflowApproval.updated_at >= period_start,
+            WorkflowApproval.updated_at <= period_end,
+        )
+        .all()
+    ]
+
+    if period == "day":
+        keys = list(range(24))
+        labels = {hour: f"{hour:02d}h" for hour in keys}
+        key_for = lambda value: value.astimezone(DASHBOARD_TIMEZONE).hour
+    else:
+        first_local = period_start.astimezone(DASHBOARD_TIMEZONE)
+        day_count = (now_local.date() - first_local.date()).days + 1
+        local_days = [first_local.date() + timedelta(days=i) for i in range(day_count)]
+        keys = local_days
+        if period == "week":
+            day_labels = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
+            labels = {day: day_labels[day.weekday()] for day in keys}
+        else:
+            labels = {day: day.strftime("%d/%m") for day in keys}
+        key_for = lambda value: value.astimezone(DASHBOARD_TIMEZONE).date()
+
+    ai_counts = {key: 0 for key in keys}
+    handoff_counts = {key: 0 for key in keys}
+    for created_at in assistant_times:
+        key = key_for(created_at)
+        if key in ai_counts:
+            ai_counts[key] += 1
+    for updated_at in handoff_times:
+        key = key_for(updated_at)
+        if key in handoff_counts:
+            handoff_counts[key] += 1
+
+    return [
+        {
+            "day": labels[key],
+            "ai": ai_counts[key],
+            "handoff": handoff_counts[key],
+        }
+        for key in keys
+    ]
+
 
 @router.get("/stats", summary="Get real dashboard statistics from Database")
 def get_dashboard_stats(
@@ -36,6 +148,7 @@ def get_dashboard_stats(
     current_user: User = Depends(get_current_active_user),
 ) -> Dict[str, Any]:
     tenant_id = current_user.tenant_id
+    period_start, period_end, now_local = _period_bounds(period)
 
     # 1. AI Agents Stats (Auto-seed if missing)
     agents = ensure_tenant_default_agents(db, tenant_id)
@@ -46,13 +159,29 @@ def get_dashboard_stats(
     total_employees = db.query(User).filter(User.tenant_id == tenant_id).count()
     active_employees = db.query(User).filter(User.tenant_id == tenant_id, User.is_active == True).count()
 
-    # 3. Total Messages & Audit Logs
-    total_audit_logs = db.query(AuditLog).filter(AuditLog.tenant_id == tenant_id).count()
-    total_workflows = db.query(AgentWorkflow).filter(AgentWorkflow.tenant_id == tenant_id).count()
-    total_messages = total_audit_logs + total_workflows
+    # 3. Total chat messages. Audit logs and workflows are operational events,
+    # not user/assistant messages, so they must not be used for this KPI.
+    message_query = db.query(ChatMessage).join(
+        ChatConversation,
+        ChatMessage.conversation_id == ChatConversation.id,
+    ).filter(
+        ChatConversation.tenant_id == tenant_id,
+        ChatMessage.created_at >= period_start,
+        ChatMessage.created_at <= period_end,
+    )
+    total_messages = message_query.count()
+    total_workflows = db.query(AgentWorkflow).filter(
+        AgentWorkflow.tenant_id == tenant_id,
+        AgentWorkflow.created_at >= period_start,
+        AgentWorkflow.created_at <= period_end,
+    ).count()
 
     # 4. Handoffs (Approvals)
-    total_approvals = db.query(WorkflowApproval).join(AgentWorkflow).filter(AgentWorkflow.tenant_id == tenant_id).count()
+    total_approvals = db.query(WorkflowApproval).join(AgentWorkflow).filter(
+        AgentWorkflow.tenant_id == tenant_id,
+        WorkflowApproval.updated_at >= period_start,
+        WorkflowApproval.updated_at <= period_end,
+    ).count()
     handoff_rate = round((total_approvals / (total_workflows or 1)) * 100, 1)
 
     # 5. Chatbots Table Data with Dynamic Accuracy from Audit Logs
@@ -60,10 +189,21 @@ def get_dashboard_stats(
     for agent in agents:
         agent_logs = db.query(AuditLog).filter(
             AuditLog.tenant_id == tenant_id,
-            AuditLog.agent_role == agent.role_code
+            AuditLog.agent_role == agent.role_code,
+            AuditLog.created_at >= period_start,
+            AuditLog.created_at <= period_end,
         ).all()
         
         agent_logs_count = len(agent_logs)
+        conversation_count = db.query(func.count(func.distinct(ChatMessage.conversation_id))).join(
+            ChatConversation,
+            ChatMessage.conversation_id == ChatConversation.id,
+        ).filter(
+            ChatConversation.tenant_id == tenant_id,
+            ChatConversation.ai_agent_id == agent.id,
+            ChatMessage.created_at >= period_start,
+            ChatMessage.created_at <= period_end,
+        ).scalar() or 0
         
         # Calculate real Accuracy: ratio of non-error execution outputs or default 98.0% if active
         if not agent.is_active:
@@ -80,21 +220,40 @@ def get_dashboard_stats(
             "emoji": agent.avatar_emoji or "🤖",
             "dept": ROLE_DEPT_MAP.get(agent.role_code, agent.role_code),
             "role_code": agent.role_code,
-            "conversations": agent_logs_count,
+            "conversations": conversation_count,
             "accuracy": calc_accuracy,
             "status": "active" if agent.is_active else "inactive",
         })
 
-    # 6. Top Employee Users (From DB Users table)
-    top_users = db.query(User).filter(User.tenant_id == tenant_id).limit(5).all()
-    
+    # 6. Top Employee Users ordered by real USER messages in the selected period.
+    message_counts = db.query(
+        ChatConversation.user_id.label("user_id"),
+        func.count(ChatMessage.id).label("message_count"),
+    ).join(
+        ChatMessage,
+        ChatMessage.conversation_id == ChatConversation.id,
+    ).filter(
+        ChatConversation.tenant_id == tenant_id,
+        ChatMessage.sender == "USER",
+        ChatMessage.created_at >= period_start,
+        ChatMessage.created_at <= period_end,
+    ).group_by(ChatConversation.user_id).subquery()
+
+    count_value = func.coalesce(message_counts.c.message_count, 0)
+    top_users = db.query(User, count_value.label("message_count")).outerjoin(
+        message_counts,
+        message_counts.c.user_id == User.id,
+    ).filter(
+        User.tenant_id == tenant_id,
+    ).order_by(
+        count_value.desc(),
+        User.full_name.asc(),
+    ).limit(5).all()
+
+    max_user_messages = max((int(count) for _, count in top_users), default=0)
     top_employees_data = []
-    for idx, u in enumerate(top_users):
-        user_workflows_count = db.query(AgentWorkflow).filter(
-            AgentWorkflow.tenant_id == tenant_id,
-            AgentWorkflow.initiator_id == u.id
-        ).count()
-        
+    for u, user_messages_count in top_users:
+        user_messages_count = int(user_messages_count)
         # Initials for avatar
         name_parts = u.full_name.split()
         initials = "".join([p[0] for p in name_parts[:2]]).upper() if name_parts else "U"
@@ -104,57 +263,46 @@ def get_dashboard_stats(
             "name": u.full_name,
             "dept": u.department,
             "avatar": initials,
-            "msgs": user_workflows_count,
-            "pct": min(100, int(((idx + 1) / max(len(top_users), 1)) * 100)),
+            "msgs": user_messages_count,
+            "pct": round((user_messages_count / max_user_messages) * 100) if max_user_messages else 0,
         })
 
-    # 7. Usage Trend Data (Last 7 Days)
-    now = datetime.now(timezone.utc)
-    days_map = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"]
-    usage_trend = []
-    for i in range(6, -1, -1):
-        target_day = now - timedelta(days=i)
-        day_str = days_map[target_day.weekday()]
-        
-        start_of_day = target_day.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_of_day = target_day.replace(hour=23, minute=59, second=59, microsecond=999999)
-        
-        ai_count = db.query(AuditLog).filter(
-            AuditLog.tenant_id == tenant_id,
-            AuditLog.created_at >= start_of_day,
-            AuditLog.created_at <= end_of_day
-        ).count()
-        
-        handoff_count = db.query(WorkflowApproval).filter(
-            WorkflowApproval.updated_at >= start_of_day,
-            WorkflowApproval.updated_at <= end_of_day
-        ).count()
-        
-        usage_trend.append({
-            "day": day_str,
-            "ai": ai_count,
-            "handoff": handoff_count,
-        })
+    # 7. Usage Trend Data follows the selected day/week/month period.
+    usage_trend = _build_usage_trend(
+        db, tenant_id, period, period_start, period_end, now_local
+    )
 
-    # 8. Monthly Data (Last 12 Months) & Dynamic Mini Stats
+    # 8. Monthly Data: all 12 months of the current local calendar year.
     monthly_data = []
-    for m in range(1, 13):
-        month_logs = db.query(AuditLog).filter(
-            AuditLog.tenant_id == tenant_id,
-            func.extract("month", AuditLog.created_at) == m
+    current_month_local = _month_start(now_local)
+    year_start_local = current_month_local.replace(month=1)
+    for offset in range(12):
+        month_start_local = _month_start(year_start_local, offset)
+        next_month_local = _month_start(year_start_local, offset + 1)
+        month_messages = db.query(ChatMessage).join(
+            ChatConversation,
+            ChatMessage.conversation_id == ChatConversation.id,
+        ).filter(
+            ChatConversation.tenant_id == tenant_id,
+            ChatMessage.created_at >= month_start_local.astimezone(timezone.utc),
+            ChatMessage.created_at < next_month_local.astimezone(timezone.utc),
         ).count()
         monthly_data.append({
-            "month": f"T{m}",
-            "value": month_logs,
+            "month": f"T{month_start_local.month}",
+            "value": month_messages,
         })
 
     # Calculated Monthly Mini Stats
-    current_month_logs = db.query(AuditLog).filter(
-        AuditLog.tenant_id == tenant_id,
-        func.extract("month", AuditLog.created_at) == now.month
+    current_month_messages = db.query(ChatMessage).join(
+        ChatConversation,
+        ChatMessage.conversation_id == ChatConversation.id,
+    ).filter(
+        ChatConversation.tenant_id == tenant_id,
+        ChatMessage.created_at >= current_month_local.astimezone(timezone.utc),
+        ChatMessage.created_at <= period_end,
     ).count()
     
-    avg_per_day = round(current_month_logs / max(now.day, 1), 1)
+    avg_per_day = round(current_month_messages / max(now_local.day, 1), 1)
 
     return {
         "kpi": {
@@ -175,6 +323,12 @@ def get_dashboard_stats(
         "top_employees": top_employees_data,
         "usage_trend": usage_trend,
         "monthly_data": monthly_data,
+        "period": {
+            "key": period,
+            "start": period_start.isoformat(),
+            "end": period_end.isoformat(),
+            "timezone": str(DASHBOARD_TIMEZONE),
+        },
     }
 
 
@@ -450,4 +604,3 @@ def export_report_pdf(
             media_type="text/plain",
             headers={"Content-Disposition": f"attachment; filename=chatbot-report-{period}.txt"}
         )
-

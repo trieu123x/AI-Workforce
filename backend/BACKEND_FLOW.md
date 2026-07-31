@@ -181,3 +181,5 @@ def get_dashboard_stats(
    ```bash
    .\venv\Scripts\pytest
    ```
+
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload

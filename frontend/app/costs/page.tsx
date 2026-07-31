@@ -255,14 +255,14 @@ export default function CostsManagementPage() {
       setRefreshing(true);
       setErrorMessage(null);
       const [sumRes, statsRes, agentRes, empRes, deptRes, wfRes, budgetRes, routingRes] = await Promise.all([
-        api.get<CostSummary>("/costs/summary"),
-        api.get<TokenStatistics>("/costs/token-stats"),
-        api.get<AgentCost[]>("/costs/by-agent"),
-        api.get<EmployeeCost[]>("/costs/by-employee"),
-        api.get<DepartmentCost[]>("/costs/by-department"),
-        api.get<WorkflowCost[]>("/costs/by-workflow"),
-        api.get<BudgetsAlerts>("/costs/budgets-alerts"),
-        api.get<RoutingRule[]>("/costs/model-routing"),
+        api.get<CostSummary>("/api/v1/costs/summary"),
+        api.get<TokenStatistics>("/api/v1/costs/token-stats"),
+        api.get<AgentCost[]>("/api/v1/costs/by-agent"),
+        api.get<EmployeeCost[]>("/api/v1/costs/by-employee"),
+        api.get<DepartmentCost[]>("/api/v1/costs/by-department"),
+        api.get<WorkflowCost[]>("/api/v1/costs/by-workflow"),
+        api.get<BudgetsAlerts>("/api/v1/costs/budgets-alerts"),
+        api.get<RoutingRule[]>("/api/v1/costs/model-routing"),
       ]);
 
       setSummary(sumRes.data);
@@ -291,7 +291,7 @@ export default function CostsManagementPage() {
   // Save Budget Limit
   const handleSaveBudget = async () => {
     try {
-      await api.post("/costs/budgets", budgetForm);
+      await api.post("/api/v1/costs/budgets", budgetForm);
       setEditingBudget(null);
       fetchAllData();
     } catch {
@@ -302,7 +302,7 @@ export default function CostsManagementPage() {
   // Save Model Routing Rule
   const handleSaveRoutingRule = async () => {
     try {
-      await api.post("/costs/model-routing", ruleForm);
+      await api.post("/api/v1/costs/model-routing", ruleForm);
       setEditingRule(null);
       fetchAllData();
     } catch {

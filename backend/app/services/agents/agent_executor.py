@@ -139,13 +139,33 @@ def execute_agent_chat(
                 message,
                 department="HR",
                 collections=agent.knowledge_access or None,
+                user_role=user.role,
+                user_department=user.department,
             )
             response_data["tools_executed"].append({
                 "tool_name": "hybrid_rag_search",
                 "input": {"query": message},
                 "result_count": len(search_results),
             })
-            log_audit_action(db, user.tenant_id, "HR", "hybrid_rag_search", {"query": message}, {"count": len(search_results)})
+            log_audit_action(
+                db,
+                user.tenant_id,
+                "HR",
+                "hybrid_rag_search",
+                {"query": message},
+                {
+                    "count": len(search_results),
+                    "chunks": [
+                        {
+                            "chunk_id": item["id"],
+                            "document_id": item["document_id"],
+                            "version": item["version"],
+                            "page": item["page"],
+                        }
+                        for item in search_results
+                    ],
+                },
+            )
 
             if search_results:
                 top_result = search_results[0]
@@ -173,6 +193,8 @@ def execute_agent_chat(
             message,
             department="*" if user.role in {"Owner", "Admin", "CEO"} else user.department,
             collections=agent.knowledge_access or None,
+            user_role=user.role,
+            user_department=user.department,
         )
 
         # Out-of-domain query check: ensure at least some word overlap with knowledge base
@@ -190,7 +212,25 @@ def execute_agent_chat(
             "input": {"query": message, "department": user.department},
             "result_count": len(search_results),
         })
-        log_audit_action(db, user.tenant_id, "KNOWLEDGE", "hybrid_search_documents", {"query": message}, {"count": len(search_results)})
+        log_audit_action(
+            db,
+            user.tenant_id,
+            "KNOWLEDGE",
+            "hybrid_search_documents",
+            {"query": message},
+            {
+                "count": len(search_results),
+                "chunks": [
+                    {
+                        "chunk_id": item["id"],
+                        "document_id": item["document_id"],
+                        "version": item["version"],
+                        "page": item["page"],
+                    }
+                    for item in search_results
+                ],
+            },
+        )
 
         if search_results:
             response_data["citations"] = search_results

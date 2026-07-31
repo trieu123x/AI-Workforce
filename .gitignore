@@ -12,6 +12,7 @@ __pycache__/
 .pytest_cache/
 backend/venv/
 backend/.venv/
+backend/data/
 
 # Node.js / Next.js
 node_modules/
@@ -34,4 +35,3 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
-

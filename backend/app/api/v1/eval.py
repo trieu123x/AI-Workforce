@@ -30,7 +30,14 @@ def run_rag_benchmark(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> Dict[str, Any]:
-    chunks = hybrid_search_documents(db, current_user.tenant_id, req.query, top_k=5)
+    chunks = hybrid_search_documents(
+        db,
+        current_user.tenant_id,
+        req.query,
+        top_k=5,
+        user_role=current_user.role,
+        user_department=current_user.department,
+    )
     sample_answer = chunks[0]["content"] if chunks else "Thông tin được cập nhật theo quy định công ty."
     
     scorecard = evaluate_rag_quality(req.query, chunks, sample_answer)

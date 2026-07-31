@@ -4,11 +4,12 @@ All tables defined per enterprise specification (Multi-tenant, Tasks, Agents, Wo
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -66,6 +67,9 @@ class Tenant(Base):
         "Department", back_populates="tenant", cascade="all, delete-orphan"
     )
     ai_agents: Mapped[list["AIAgent"]] = relationship("AIAgent", back_populates="tenant", cascade="all, delete-orphan")
+    knowledge_documents: Mapped[list["KnowledgeDocument"]] = relationship(
+        "KnowledgeDocument", back_populates="tenant", cascade="all, delete-orphan"
+    )
     document_chunks: Mapped[list["DocumentChunk"]] = relationship("DocumentChunk", back_populates="tenant", cascade="all, delete-orphan")
     workflows: Mapped[list["AgentWorkflow"]] = relationship("AgentWorkflow", back_populates="tenant")
     tasks: Mapped[list["Task"]] = relationship("Task", back_populates="tenant", cascade="all, delete-orphan")
@@ -624,10 +628,20 @@ class ModelRoutingRule(Base):
 
 
 # ============================================================
-# 9. DOCUMENT_CHUNKS & COLLECTIONS — pgvector knowledge store
+# 9. KNOWLEDGE DOCUMENTS & CHUNKS — governed pgvector knowledge store
 # ============================================================
-class DocumentChunk(Base):
-    __tablename__ = "document_chunks"
+class KnowledgeDocument(Base):
+    __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "document_id", "version", name="uq_knowledge_document_version"
+        ),
+        CheckConstraint(
+            "processing_status IN ('uploaded', 'parsing', 'chunking', 'embedding', 'indexing', 'ready', 'failed')",
+            name="ck_knowledge_documents_processing_status",
+        ),
+        Index("idx_knowledge_documents_tenant_status", "tenant_id", "status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -635,13 +649,109 @@ class DocumentChunk(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
+    document_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    document_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    department: Mapped[str] = mapped_column(String(50), nullable=False, default="ALL")
+    document_type: Mapped[str] = mapped_column(String(50), nullable=False, default="knowledge")
+    version: Mapped[str] = mapped_column(String(50), nullable=False, default="1.0")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    processing_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="uploaded"
+    )
+    confidentiality: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="internal"
+    )
+    allowed_roles: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    embedding_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="knowledge_documents")
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        "DocumentChunk", back_populates="knowledge_document"
+    )
+
+
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'active', 'inactive', 'archived')",
+            name="ck_doc_chunks_status",
+        ),
+        CheckConstraint(
+            "confidentiality IN ('public', 'internal', 'confidential', 'restricted')",
+            name="ck_doc_chunks_confidentiality",
+        ),
+        Index(
+            "idx_doc_chunks_governance",
+            "tenant_id",
+            "status",
+            "department_access",
+            "effective_date",
+        ),
+        Index("idx_doc_chunks_document", "tenant_id", "document_id"),
+        Index(
+            "idx_doc_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    knowledge_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     document_name: Mapped[str] = mapped_column(String(255), nullable=False)
     document_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    document_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    document_type: Mapped[str] = mapped_column(String(50), default="knowledge")
+    version: Mapped[str] = mapped_column(String(50), default="1.0")
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    confidentiality: Mapped[str] = mapped_column(String(30), default="internal")
+    allowed_roles: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    source_file: Mapped[str | None] = mapped_column(String(255), nullable=True)
     collection_name: Mapped[str] = mapped_column(String(100), default="General Knowledge")
     department_access: Mapped[str] = mapped_column(String(50), default="ALL")
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    section_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    embedding_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    embedding_status: Mapped[str] = mapped_column(String(20), default="pending")
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
     dense_embedding: Mapped[list[float] | None] = mapped_column(
         Vector(1536), nullable=True
     )
@@ -651,6 +761,9 @@ class DocumentChunk(Base):
 
     # Relationships
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="document_chunks")
+    knowledge_document: Mapped["KnowledgeDocument | None"] = relationship(
+        "KnowledgeDocument", back_populates="chunks"
+    )
 
 
 # ============================================================

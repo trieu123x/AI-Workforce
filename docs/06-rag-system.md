@@ -7,8 +7,10 @@ flowchart TD
     subgraph Ingestion_Pipeline [Đường Ống Nạp Tài Liệu - Ingestion]
         Doc[File Tài Liệu: PDF / DOCX / Markdown] --> Parser[Layout-aware Document Parser]
         Parser --> OCR[OCR Engine cho Scan PDF / Ảnh]
-        OCR --> Chunking[Semantic Header Chunking - 512 Tokens]
-        Chunking --> Embedder[Embedding Model: BGE-M3]
+        OCR --> Cleaning[Conservative Text Cleaning]
+        Cleaning --> Chunking[Semantic-first Chunking - max 700 Tokens]
+        Chunking --> Hash[SHA-256 Deduplication]
+        Hash --> Embedder[Versioned Embedding Model - 1024 dims]
         Embedder --> VectorDB[(PostgreSQL - pgvector & BM25 Index)]
     end
 
@@ -26,19 +28,35 @@ flowchart TD
 
 ## 6.2 Chiến Lược Cắt Khúc Tài Liệu (Chunking Strategy)
 
-- **Kích thước Chunk**: 512 Tokens với Overlap 64 Tokens.
-- **Phương pháp**: **Semantic Header-Aware Chunking**. Hệ thống nhận diện các thẻ Tiêu đề (`# H1`, `## H2`, `### H3`) để giữ nguyên ngữ cảnh phân mục trong văn bản.
+- **Semantic-first**: ưu tiên tách theo Heading, Điều, Khoản, Bước trong quy trình, mục Trách nhiệm và mục Điều kiện. Các section ngắn không bị gộp hoặc cắt chỉ để đạt kích thước cố định.
+- **Token fallback**: chỉ section vượt ngưỡng cấu hình mới được chia tiếp; cấu hình mặc định `min=100`, `target=450`, `max=700`, `overlap=80`.
+- **Ngữ cảnh phân cấp**: mỗi chunk giữ `section_type`, `section_title`, `header_path`, số trang bắt đầu và danh sách trang liên quan.
+- **Governance trước retrieval**: mọi truy vấn phải lọc theo tenant, phòng ban, role, trạng thái, ngày hiệu lực, ngày hết hạn và mức bảo mật trước khi xếp hạng.
 - **Metadata đi kèm từng Chunk**:
   ```json
   {
-    "document_id": "DOC-2025-0811",
-    "document_name": "Chinh_sach_Cong_tac_phi_2025.pdf",
-    "department_access": "FINANCE",
-    "page_number": 14,
-    "section_title": "4.2 Chi phí lưu trú khách sạn",
-    "created_at": "2026-07-27T10:00:00Z"
+    "id": "chunk-uuid",
+    "tenant_id": "company_a",
+    "department": "HR",
+    "document_type": "policy",
+    "document_id": "leave-policy-2026",
+    "document_title": "Chính sách nghỉ phép",
+    "section_title": "Quy trình xin nghỉ",
+    "content": "Nhân viên phải gửi yêu cầu...",
+    "version": "2.1",
+    "effective_date": "2026-07-01",
+    "expiration_date": null,
+    "status": "active",
+    "confidentiality": "internal",
+    "allowed_roles": ["employee", "hr", "manager"],
+    "source_file": "leave_policy_v2.1.pdf",
+    "page": 4
   }
   ```
+
+- **Embedding input**: chỉ đưa phòng ban, loại tài liệu, tên tài liệu, section và nội dung vào model. Tenant, ACL, status và ngày hiệu lực chỉ dùng làm database filter.
+- **Versioning**: lưu `content_hash`, `embedding_model` và `embedding_version`; chunk không đổi được tái sử dụng vector, version tài liệu cũ được chuyển sang `inactive`.
+- **Lifecycle**: document đi qua `uploaded → parsing → chunking → embedding → indexing → ready`; lỗi được giữ ở trạng thái `failed` cùng thông báo để retry/audit.
 
 ## 6.3 Thuật Toán Kết Hợp Reciprocal Rank Fusion (RRF Algorithm)
 

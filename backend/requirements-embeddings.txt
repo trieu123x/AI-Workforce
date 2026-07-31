@@ -1,0 +1,3 @@
+# Optional local embedding worker dependencies. Keep these outside the API's
+# lightweight default environment because PyTorch deployment is platform-specific.
+sentence-transformers>=3.0,<6.0

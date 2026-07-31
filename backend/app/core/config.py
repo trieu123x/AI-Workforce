@@ -53,6 +53,24 @@ class Settings(BaseSettings):
     MINIO_ENDPOINT: str = "localhost:9000"
     MINIO_ACCESS_KEY: Optional[str] = None
     MINIO_SECRET_KEY: Optional[str] = None
+    KNOWLEDGE_STORAGE_PATH: str = "data/knowledge"
+
+    # --- Knowledge embeddings ---
+    EMBEDDING_BACKEND: str = "deterministic"
+    EMBEDDING_MODEL_NAME: str = "Qwen/Qwen3-Embedding-0.6B"
+    EMBEDDING_VERSION: str = "qwen3-embedding-v1"
+    EMBEDDING_DIMENSION: int = 1024
+    EMBEDDING_BATCH_SIZE: int = 16
+    EMBEDDING_DEVICE: str = "cpu"
+    EMBEDDING_CACHE_FOLDER: Optional[str] = None
+    EMBEDDING_LOCAL_FILES_ONLY: bool = False
+    EMBEDDING_MAX_RETRIES: int = 3
+    RAG_CHUNK_MIN_TOKENS: int = 100
+    RAG_CHUNK_TARGET_TOKENS: int = 450
+    RAG_CHUNK_MAX_TOKENS: int = 700
+    RAG_CHUNK_OVERLAP_TOKENS: int = 80
+    RAG_MIN_DENSE_SCORE: float = 0.50
+    RAG_MIN_RELEVANCE_SCORE: float = 0.50
 
     # --- CORS ---
     FRONTEND_URL: str = "http://localhost:3000"
@@ -74,6 +92,18 @@ class Settings(BaseSettings):
                 f"postgresql+asyncpg://{user}:{password}@"
                 f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{database}"
             )
+        if not 0 <= self.RAG_CHUNK_OVERLAP_TOKENS < self.RAG_CHUNK_MAX_TOKENS:
+            raise ValueError("RAG chunk overlap must be smaller than max tokens")
+        if not (
+            0 < self.RAG_CHUNK_MIN_TOKENS
+            <= self.RAG_CHUNK_TARGET_TOKENS
+            <= self.RAG_CHUNK_MAX_TOKENS
+        ):
+            raise ValueError("RAG chunk token limits must satisfy min <= target <= max")
+        if not -1.0 <= self.RAG_MIN_DENSE_SCORE <= 1.0:
+            raise ValueError("RAG minimum dense score must be between -1 and 1")
+        if not 0.0 <= self.RAG_MIN_RELEVANCE_SCORE <= 1.0:
+            raise ValueError("RAG minimum relevance score must be between 0 and 1")
         return self
 
     @property

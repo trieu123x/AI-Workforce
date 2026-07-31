@@ -45,6 +45,70 @@ def test_employee_cannot_list_organization(client, employee_token_headers):
     assert response.status_code == 403
 
 
+def test_user_management_pagination_filters_and_update_response(
+    client, ceo_token_headers, transactional_db_session
+):
+    owner = transactional_db_session.query(User).filter(
+        User.email == "admin@company.com"
+    ).one()
+    for index in range(35):
+        transactional_db_session.add(User(
+            tenant_id=owner.tenant_id,
+            email=f"page-filter-{index}-{uuid.uuid4().hex[:6]}@example.com",
+            full_name=f"Page Filter Employee {index:02d}",
+            password_hash=owner.password_hash,
+            role="Employee" if index % 2 == 0 else "Manager",
+            department="HR" if index % 3 == 0 else "IT",
+            is_active=True,
+        ))
+    transactional_db_session.commit()
+
+    first_page = client.get(
+        "/api/v1/users-mgmt?page=1&page_size=30",
+        headers=ceo_token_headers,
+    )
+    assert first_page.status_code == 200
+    assert len(first_page.json()["items"]) == 30
+    assert first_page.json()["pagination"]["page_size"] == 30
+    assert first_page.json()["pagination"]["total"] >= 35
+
+    second_page = client.get(
+        "/api/v1/users-mgmt?page=2&page_size=30",
+        headers=ceo_token_headers,
+    )
+    assert second_page.status_code == 200
+    assert second_page.json()["items"]
+
+    filtered = client.get(
+        "/api/v1/users-mgmt",
+        params={
+            "page": 1,
+            "page_size": 30,
+            "q": "Page Filter",
+            "department": "HR",
+            "role": "Employee",
+        },
+        headers=ceo_token_headers,
+    )
+    assert filtered.status_code == 200
+    assert filtered.json()["items"]
+    assert all(
+        item["department"] == "HR" and item["role"] == "Employee"
+        for item in filtered.json()["items"]
+    )
+
+    target = filtered.json()["items"][0]
+    updated = client.patch(
+        f"/api/v1/users-mgmt/{target['id']}/status",
+        headers=ceo_token_headers,
+        json={"department": "IT", "role": "Manager"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["user"]["id"] == target["id"]
+    assert updated.json()["user"]["department"] == "IT"
+    assert updated.json()["user"]["role"] == "Manager"
+
+
 def test_employee_task_scope(client, ceo_token_headers, employee_token_headers):
     employee = client.get("/api/v1/users/", headers=ceo_token_headers).json()
     employee_id = next(item["id"] for item in employee if item["email"] == "employee@company.com")
@@ -70,6 +134,91 @@ def test_employee_task_scope(client, ceo_token_headers, employee_token_headers):
     titles = {item["title"] for item in visible.json()}
     assert "Assigned employee task" in titles
     assert "Board-only task" not in titles
+
+
+def test_task_response_exposes_valid_transitions_and_terminal_task_is_immutable(
+    client, ceo_token_headers
+):
+    created = client.post(
+        "/api/v1/tasks",
+        headers=ceo_token_headers,
+        json={"title": "Task lifecycle contract", "status": "PENDING"},
+    )
+    assert created.status_code == 201
+    task_id = created.json()["task_id"]
+
+    pending = client.get(f"/api/v1/tasks/{task_id}", headers=ceo_token_headers)
+    assert pending.status_code == 200
+    assert pending.json()["allowed_transitions"] == [
+        "RUNNING", "CANCELLED", "OVERDUE"
+    ]
+
+    running = client.patch(
+        f"/api/v1/tasks/{task_id}",
+        headers=ceo_token_headers,
+        json={"status": "RUNNING"},
+    )
+    assert running.status_code == 200
+    completed = client.patch(
+        f"/api/v1/tasks/{task_id}",
+        headers=ceo_token_headers,
+        json={"status": "COMPLETED"},
+    )
+    assert completed.status_code == 200
+
+    terminal = client.get(f"/api/v1/tasks/{task_id}", headers=ceo_token_headers)
+    assert terminal.json()["status"] == "COMPLETED"
+    assert terminal.json()["allowed_transitions"] == []
+
+    invalid = client.patch(
+        f"/api/v1/tasks/{task_id}",
+        headers=ceo_token_headers,
+        json={"status": "WAITING_APPROVAL"},
+    )
+    assert invalid.status_code == 409
+    assert invalid.json()["detail"] == (
+        "Invalid task transition: COMPLETED -> WAITING_APPROVAL"
+    )
+
+
+def test_completed_task_can_be_deleted_but_active_task_cannot(
+    client, ceo_token_headers
+):
+    active = client.post(
+        "/api/v1/tasks",
+        headers=ceo_token_headers,
+        json={"title": "Active task cannot be deleted", "status": "PENDING"},
+    )
+    active_id = active.json()["task_id"]
+    rejected = client.delete(
+        f"/api/v1/tasks/{active_id}", headers=ceo_token_headers
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == (
+        "Only DRAFT or COMPLETED tasks can be deleted; "
+        "cancel active tasks instead"
+    )
+
+    running = client.patch(
+        f"/api/v1/tasks/{active_id}",
+        headers=ceo_token_headers,
+        json={"status": "RUNNING"},
+    )
+    assert running.status_code == 200
+    completed = client.patch(
+        f"/api/v1/tasks/{active_id}",
+        headers=ceo_token_headers,
+        json={"status": "COMPLETED"},
+    )
+    assert completed.status_code == 200
+
+    deleted = client.delete(
+        f"/api/v1/tasks/{active_id}", headers=ceo_token_headers
+    )
+    assert deleted.status_code == 200
+    assert client.get(
+        f"/api/v1/tasks/{active_id}", headers=ceo_token_headers
+    ).status_code == 404
 
 
 def test_agent_tool_policy_is_enforced(
