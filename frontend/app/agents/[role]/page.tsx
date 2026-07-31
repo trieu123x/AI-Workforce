@@ -1,9 +1,24 @@
 "use client";
 
 import axios from "axios";
-import { useCallback, useEffect, useState } from "react";
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Bot, Copy, Download, History, MessageSquare, RefreshCw, Save, Send, Settings, ThumbsDown, ThumbsUp } from "lucide-react";
+import {
+  Bot,
+  Copy,
+  Download,
+  History,
+  MessageSquare,
+  Plus,
+  RefreshCw,
+  Save,
+  Send,
+  Settings,
+  ThumbsDown,
+  ThumbsUp,
+  X,
+} from "lucide-react";
+
 import Sidebar from "@/components/Sidebar";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/useAuthStore";
@@ -36,24 +51,38 @@ interface ChatResponse {
   citations: Citation[];
 }
 
+interface ChatMessage {
+  id: string;
+  sender: "USER" | "ASSISTANT";
+  content: string;
+  citations: Citation[];
+  feedback_rating: number | null;
+  created_at: string | null;
+}
+
 interface Conversation {
   id: string;
   title: string;
   agent_role: string;
+  agent_name?: string;
+  owner_id: string;
+  is_shared: boolean;
   message_count: number;
   updated_at?: string;
 }
 
-interface AgentStats {
-  executions: number;
-  success_rate: number;
-  cost_usd: number;
+interface ConversationDetail {
+  id: string;
+  title: string;
+  agent_role: string;
+  is_shared: boolean;
+  messages: ChatMessage[];
 }
 
 function messageFrom(error: unknown) {
-  return axios.isAxiosError(error)
-    ? String(error.response?.data?.detail || error.message)
-    : "Không thể xử lý yêu cầu.";
+  if (!axios.isAxiosError(error)) return "Không thể xử lý yêu cầu.";
+  const detail = error.response?.data?.detail;
+  return typeof detail === "string" ? detail : error.message;
 }
 
 export default function AgentPage() {
@@ -62,31 +91,51 @@ export default function AgentPage() {
   const router = useRouter();
   const { isAuthenticated, hasHydrated, user } = useAuthStore();
   const [agent, setAgent] = useState<Agent | null>(null);
-  const [stats, setStats] = useState<AgentStats | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [message, setMessage] = useState("");
-  const [response, setResponse] = useState<ChatResponse | null>(null);
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [tools, setTools] = useState("");
   const [allowed, setAllowed] = useState("");
   const [denied, setDenied] = useState("");
   const [collections, setCollections] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const fetchAgent = useCallback(async () => {
+  const fetchConversations = useCallback(async () => {
+    const { data } = await api.get<Conversation[]>("/api/v1/agent/conversations");
+    const filtered = data.filter((item) => item.agent_role === role);
+    setConversations(filtered);
+  }, [role]);
+
+  const fetchPageData = useCallback(async () => {
     setError(null);
     try {
-      const [agentResponse, statsResponse, conversationsResponse] = await Promise.all([
+      const [agentResponse, conversationsResponse] = await Promise.all([
         api.get<Agent>(`/api/v1/agents/${role}`),
-        api.get<AgentStats>(`/api/v1/agents/${role}/stats`),
         api.get<Conversation[]>("/api/v1/agent/conversations"),
       ]);
       const value = agentResponse.data;
+      const filtered = conversationsResponse.data.filter(
+        (item) => item.agent_role === role,
+      );
       setAgent(value);
-      setStats(statsResponse.data);
-      setConversations(conversationsResponse.data.filter((item) => item.agent_role === role));
+      setConversations(filtered);
+      const initialConversationId = filtered[0]?.id || null;
+      setConversationId(initialConversationId);
+      if (initialConversationId) {
+        const { data } = await api.get<ConversationDetail>(
+          `/api/v1/agent/conversations/${initialConversationId}`,
+        );
+        setMessages(data.messages);
+      } else {
+        setMessages([]);
+      }
       setPrompt(value.system_prompt);
       setTools(value.tools_access.join(", "));
       setAllowed(value.allowed_actions.join(", "));
@@ -97,44 +146,103 @@ export default function AgentPage() {
     }
   }, [role]);
 
+  const loadConversation = useCallback(async (id: string) => {
+    setConversationLoading(true);
+    setError(null);
+    try {
+      const { data } = await api.get<ConversationDetail>(
+        `/api/v1/agent/conversations/${id}`,
+      );
+      setMessages(data.messages);
+    } catch (reason) {
+      setError(messageFrom(reason));
+      setMessages([]);
+    } finally {
+      setConversationLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!hasHydrated) return;
     if (!isAuthenticated) {
       router.replace("/login");
       return;
     }
-    const timer = window.setTimeout(() => void fetchAgent(), 0);
+    const timer = window.setTimeout(() => void fetchPageData(), 0);
     return () => window.clearTimeout(timer);
-  }, [fetchAgent, hasHydrated, isAuthenticated, router]);
+  }, [fetchPageData, hasHydrated, isAuthenticated, router]);
 
-  const sendMessage = async (event: React.FormEvent) => {
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, busy]);
+
+  const sendMessage = async (event: FormEvent) => {
     event.preventDefault();
-    if (!message.trim() || !agent) return;
+    const content = message.trim();
+    if (!content || !agent || busy) return;
+    const optimisticMessage: ChatMessage = {
+      id: `pending-${Date.now()}`,
+      sender: "USER",
+      content,
+      citations: [],
+      feedback_rating: null,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((current) => [...current, optimisticMessage]);
+    setMessage("");
     setBusy(true);
     setError(null);
     try {
       const { data } = await api.post<ChatResponse>("/api/v1/agent/chat", {
         agent_role: agent.role_code,
-        message,
+        message: content,
         conversation_id: conversationId,
       });
-      setResponse(data);
       setConversationId(data.conversation_id);
-      setMessage("");
-      await fetchAgent();
+      await Promise.all([
+        loadConversation(data.conversation_id),
+        fetchConversations(),
+      ]);
     } catch (reason) {
+      setMessages((current) => current.filter((item) => item.id !== optimisticMessage.id));
+      setMessage(content);
       setError(messageFrom(reason));
     } finally {
       setBusy(false);
+      composerRef.current?.focus();
     }
+  };
+
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  };
+
+  const startNewConversation = () => {
+    setConversationId(null);
+    setMessages([]);
+    setError(null);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  };
+
+  const selectConversation = async (id: string) => {
+    if (id === conversationId) return;
+    setConversationId(id);
+    await loadConversation(id);
   };
 
   const regenerate = async () => {
-    if (!conversationId) return;
+    if (!conversationId || busy) return;
     setBusy(true);
+    setError(null);
     try {
-      const { data } = await api.post<ChatResponse>(`/api/v1/agent/conversations/${conversationId}/regenerate`);
-      setResponse(data);
+      await api.post<ChatResponse>(
+        `/api/v1/agent/conversations/${conversationId}/regenerate`,
+      );
+      await loadConversation(conversationId);
+      await fetchConversations();
     } catch (reason) {
       setError(messageFrom(reason));
     } finally {
@@ -142,10 +250,12 @@ export default function AgentPage() {
     }
   };
 
-  const rate = async (rating: -1 | 1) => {
-    if (!response) return;
+  const rate = async (messageId: string, rating: -1 | 1) => {
     try {
-      await api.post(`/api/v1/agent/messages/${response.message_id}/feedback`, { rating });
+      await api.post(`/api/v1/agent/messages/${messageId}/feedback`, { rating });
+      setMessages((current) => current.map((item) => (
+        item.id === messageId ? { ...item, feedback_rating: rating } : item
+      )));
     } catch (reason) {
       setError(messageFrom(reason));
     }
@@ -185,7 +295,10 @@ export default function AgentPage() {
     setBusy(true);
     setError(null);
     try {
-      const split = (value: string) => value.split(",").map((item) => item.trim()).filter(Boolean);
+      const split = (value: string) => value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
       const { data } = await api.patch<Agent>(`/api/v1/agents/${role}`, {
         system_prompt: prompt,
         tools_access: split(tools),
@@ -194,6 +307,7 @@ export default function AgentPage() {
         knowledge_access: split(collections),
       });
       setAgent(data);
+      setShowSettings(false);
     } catch (reason) {
       setError(messageFrom(reason));
     } finally {
@@ -203,68 +317,291 @@ export default function AgentPage() {
 
   if (!hasHydrated || !isAuthenticated) return null;
   const canConfigure = ["Owner", "Admin", "CEO"].includes(user?.role || "");
+  const selectedConversation = conversations.find((item) => item.id === conversationId);
+  const isReadOnly = Boolean(
+    selectedConversation && selectedConversation.owner_id !== user?.id,
+  );
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: "var(--body-bg)" }}>
+    <div className="ai-chat-page">
       <Sidebar agentStatuses={agent ? { [role]: agent.is_active } : {}} />
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="ai-chat-shell">
         <header className="ta-topbar">
-          <div className="breadcrumb"><span>AI Employees</span><span className="breadcrumb-sep">›</span><span className="breadcrumb-current">{agent?.name || role}</span></div>
-          <span className={`ta-badge ${agent?.is_active ? "ta-badge-success" : "ta-badge-danger"}`}>{agent?.is_active ? "Hoạt động" : "Đã tắt"}</span>
+          <div className="breadcrumb">
+            <span>AI Employees</span>
+            <span className="breadcrumb-sep">›</span>
+            <span className="breadcrumb-current">{agent?.name || role}</span>
+          </div>
+          <span className={`ta-badge ${agent?.is_active ? "ta-badge-success" : "ta-badge-danger"}`}>
+            {agent?.is_active ? "Đang hoạt động" : "Đã tắt"}
+          </span>
         </header>
-        <main style={{ padding: "24px 32px" }}>
-          {error && <div className="ta-card" style={{ padding: 13, color: "#B91C1C", marginBottom: 14 }}>{error}</div>}
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
-            <div style={{ fontSize: 34 }}>{agent?.avatar_emoji || "🤖"}</div>
-            <div><h1 style={{ fontSize: "1.5rem", fontWeight: 800 }}>{agent?.name}</h1><p style={{ color: "var(--text-muted)" }}>{agent?.description}</p></div>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(140px, 1fr))", gap: 10, marginBottom: 18 }}>
-            <div className="ta-card" style={{ padding: 14 }}><small>Lượt thực thi</small><div style={{ fontSize: 22, fontWeight: 800 }}>{stats?.executions || 0}</div></div>
-            <div className="ta-card" style={{ padding: 14 }}><small>Tỷ lệ thành công</small><div style={{ fontSize: 22, fontWeight: 800 }}>{stats?.success_rate || 0}%</div></div>
-            <div className="ta-card" style={{ padding: 14 }}><small>Chi phí ghi nhận</small><div style={{ fontSize: 22, fontWeight: 800 }}>${(stats?.cost_usd || 0).toFixed(4)}</div></div>
-          </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(260px, .7fr) minmax(500px, 1.5fr)", gap: 18 }}>
-            <section className="ta-card" style={{ padding: 18 }}>
-              <h2 style={{ display: "flex", gap: 7, alignItems: "center", fontWeight: 750, marginBottom: 12 }}><History size={17} /> Hội thoại</h2>
-              <button className="ta-btn ta-btn-primary" style={{ width: "100%", marginBottom: 10 }} onClick={() => { setConversationId(null); setResponse(null); }}><MessageSquare size={15} /> Hội thoại mới</button>
-              {conversations.map((item) => <button key={item.id} className="ta-card" onClick={() => { setConversationId(item.id); setResponse(null); }} style={{ width: "100%", textAlign: "left", padding: 11, marginBottom: 8, borderLeft: conversationId === item.id ? "3px solid var(--primary)" : undefined }}><strong>{item.title}</strong><div style={{ fontSize: 11, color: "var(--text-muted)" }}>{item.message_count} tin nhắn</div></button>)}
-            </section>
-
-            <section className="ta-card" style={{ padding: 20 }}>
-              <h2 style={{ display: "flex", gap: 7, alignItems: "center", fontWeight: 750 }}><Bot size={18} /> Chat với {agent?.name}</h2>
-              {response && <div style={{ margin: "16px 0", padding: 16, background: "#F8FAFC", borderRadius: 9 }}>
-                <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.55 }}>{response.reply}</div>
-                {response.citations.length > 0 && <div style={{ marginTop: 10, color: "var(--primary)", fontSize: 12 }}>Nguồn: {response.citations.map((item) => item.citation_tag || item.document_name).join(" · ")}</div>}
-                <div style={{ display: "flex", gap: 7, marginTop: 12 }}>
-                  <button className="ta-btn ta-btn-ghost" onClick={() => void navigator.clipboard.writeText(response.reply)}><Copy size={14} /> Copy</button>
-                  <button className="ta-btn ta-btn-ghost" onClick={() => void rate(1)}><ThumbsUp size={14} /></button>
-                  <button className="ta-btn ta-btn-ghost" onClick={() => void rate(-1)}><ThumbsDown size={14} /></button>
-                  <button className="ta-btn ta-btn-ghost" onClick={() => void regenerate()}><RefreshCw size={14} /> Regenerate</button>
-                  <button className="ta-btn ta-btn-ghost" onClick={() => void createTask()}>Tạo task</button>
-                  {conversationId && <button className="ta-btn ta-btn-ghost" onClick={() => void exportConversation()}><Download size={14} /> Export</button>}
-                </div>
-              </div>}
-              <form onSubmit={sendMessage} style={{ display: "flex", gap: 8, marginTop: 16 }}>
-                <textarea className="ta-input" rows={3} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Nhập yêu cầu..." />
-                <button className="ta-btn ta-btn-primary" disabled={busy || !agent?.is_active}><Send size={16} /> Gửi</button>
-              </form>
-            </section>
-          </div>
-
-          {canConfigure && agent && <section className="ta-card" style={{ padding: 20, marginTop: 18 }}>
-            <h2 style={{ display: "flex", gap: 7, alignItems: "center", fontWeight: 750, marginBottom: 12 }}><Settings size={18} /> Cấu hình quyền AI Employee</h2>
-            <label>System prompt</label><textarea className="ta-input" rows={5} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
-              <div><label>Tools được phép (phân tách dấu phẩy)</label><input className="ta-input" value={tools} onChange={(event) => setTools(event.target.value)} /></div>
-              <div><label>Knowledge collections</label><input className="ta-input" value={collections} onChange={(event) => setCollections(event.target.value)} /></div>
-              <div><label>Hành động được phép</label><input className="ta-input" value={allowed} onChange={(event) => setAllowed(event.target.value)} /></div>
-              <div><label>Hành động cấm</label><input className="ta-input" value={denied} onChange={(event) => setDenied(event.target.value)} /></div>
+        <main className="ai-chat-workspace">
+          <aside className="ai-chat-history">
+            <div className="ai-chat-history-header">
+              <div>
+                <span className="ai-chat-eyebrow">Tin nhắn</span>
+                <h2><History size={17} /> Hội thoại</h2>
+              </div>
+              <button
+                type="button"
+                className="ai-chat-icon-button"
+                onClick={startNewConversation}
+                aria-label="Tạo hội thoại mới"
+                title="Hội thoại mới"
+              >
+                <Plus size={18} />
+              </button>
             </div>
-            <button className="ta-btn ta-btn-primary" style={{ marginTop: 12 }} disabled={busy} onClick={() => void saveConfiguration()}><Save size={15} /> Lưu cấu hình</button>
-          </section>}
+            <button
+              type="button"
+              className="ai-chat-new-button"
+              onClick={startNewConversation}
+            >
+              <MessageSquare size={17} />
+              Hội thoại mới
+            </button>
+            <div className="ai-chat-history-list">
+              {conversations.length === 0 && (
+                <p className="ai-chat-history-empty">Các cuộc trò chuyện sẽ xuất hiện ở đây.</p>
+              )}
+              {conversations.map((item) => (
+                <button
+                  type="button"
+                  key={item.id}
+                  className={`ai-chat-history-item ${conversationId === item.id ? "active" : ""}`}
+                  onClick={() => void selectConversation(item.id)}
+                >
+                  <MessageSquare size={15} />
+                  <span>
+                    <strong>{item.title}</strong>
+                    <small>
+                      {item.message_count} tin nhắn
+                      {item.is_shared ? " · Được chia sẻ" : ""}
+                    </small>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </aside>
+
+          <section className="ai-chat-panel">
+            <header className="ai-chat-header">
+              <div className="ai-chat-agent">
+                <div className="ai-chat-agent-avatar">
+                  {agent?.avatar_emoji || <Bot size={22} />}
+                  <span className={agent?.is_active ? "online" : ""} />
+                </div>
+                <div>
+                  <h1>{agent?.name || role}</h1>
+                  <p>
+                    {isReadOnly
+                      ? "Hội thoại được chia sẻ · Chỉ đọc"
+                      : agent?.is_active
+                        ? "Đang trực tuyến"
+                        : "Hiện không hoạt động"}
+                  </p>
+                </div>
+              </div>
+              <div className="ai-chat-header-actions">
+                {conversationId && (
+                  <button type="button" onClick={() => void exportConversation()}>
+                    <Download size={16} /> Export
+                  </button>
+                )}
+                {canConfigure && (
+                  <button type="button" onClick={() => setShowSettings(true)}>
+                    <Settings size={16} /> Cấu hình
+                  </button>
+                )}
+              </div>
+            </header>
+
+            <div className="ai-chat-messages" aria-live="polite">
+              {conversationLoading && (
+                <div className="ai-chat-loading">Đang tải hội thoại…</div>
+              )}
+              {!conversationLoading && messages.length === 0 && (
+                <div className="ai-chat-welcome">
+                  <div className="ai-chat-welcome-avatar">
+                    {agent?.avatar_emoji || <Bot size={30} />}
+                  </div>
+                  <h2>Chào bạn, tôi là {agent?.name || role}</h2>
+                  <p>{agent?.description || "Tôi có thể hỗ trợ bạn xử lý công việc và tra cứu thông tin."}</p>
+                  <span>Hãy nhập câu hỏi để bắt đầu cuộc trò chuyện.</span>
+                </div>
+              )}
+              {!conversationLoading && messages.map((item) => (
+                <article
+                  className={`ai-chat-message ${item.sender === "USER" ? "user" : "assistant"}`}
+                  key={item.id}
+                >
+                  {item.sender === "ASSISTANT" && (
+                    <div className="ai-chat-message-avatar">
+                      {agent?.avatar_emoji || <Bot size={17} />}
+                    </div>
+                  )}
+                  <div className="ai-chat-message-body">
+                    <div className="ai-chat-bubble">{item.content}</div>
+                    {item.citations.length > 0 && (
+                      <div className="ai-chat-citations">
+                        <strong>Nguồn tham khảo</strong>
+                        {item.citations.map((citation, index) => (
+                          <span key={`${item.id}-citation-${index}`}>
+                            {citation.citation_tag || citation.document_name || "Tài liệu nội bộ"}
+                            {citation.section_title ? ` · ${citation.section_title}` : ""}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {item.sender === "ASSISTANT" && (
+                      <div className="ai-chat-message-actions">
+                        <button
+                          type="button"
+                          onClick={() => void navigator.clipboard.writeText(item.content)}
+                          title="Sao chép"
+                        >
+                          <Copy size={14} /> Copy
+                        </button>
+                        {!isReadOnly && (
+                          <>
+                            <button
+                              type="button"
+                              className={item.feedback_rating === 1 ? "selected" : ""}
+                              onClick={() => void rate(item.id, 1)}
+                              title="Câu trả lời hữu ích"
+                            >
+                              <ThumbsUp size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              className={item.feedback_rating === -1 ? "selected" : ""}
+                              onClick={() => void rate(item.id, -1)}
+                              title="Câu trả lời chưa tốt"
+                            >
+                              <ThumbsDown size={14} />
+                            </button>
+                          </>
+                        )}
+                        {!isReadOnly && item.id === messages.at(-1)?.id && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => void regenerate()}
+                              disabled={busy}
+                            >
+                              <RefreshCw size={14} /> Tạo lại
+                            </button>
+                            <button type="button" onClick={() => void createTask()}>
+                              Tạo task
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </article>
+              ))}
+              {busy && (
+                <div className="ai-chat-message assistant">
+                  <div className="ai-chat-message-avatar">
+                    {agent?.avatar_emoji || <Bot size={17} />}
+                  </div>
+                  <div className="ai-chat-typing" aria-label="AI đang trả lời">
+                    <span /><span /><span />
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            <div className="ai-chat-composer-wrap">
+              {error && (
+                <div className="ai-chat-error">
+                  {error}
+                  <button type="button" onClick={() => setError(null)} aria-label="Đóng">
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
+              <form className="ai-chat-composer" onSubmit={sendMessage}>
+                <textarea
+                  ref={composerRef}
+                  rows={1}
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
+                  onKeyDown={handleComposerKeyDown}
+                  placeholder={isReadOnly ? "Hội thoại này đang ở chế độ chỉ đọc" : `Nhắn tin cho ${agent?.name || role}…`}
+                  disabled={busy || !agent?.is_active || isReadOnly}
+                  aria-label="Nội dung tin nhắn"
+                />
+                <button
+                  type="submit"
+                  disabled={busy || !message.trim() || !agent?.is_active || isReadOnly}
+                  aria-label="Gửi tin nhắn"
+                  title="Gửi"
+                >
+                  <Send size={19} />
+                </button>
+              </form>
+              <p>Enter để gửi · Shift + Enter để xuống dòng</p>
+            </div>
+          </section>
         </main>
       </div>
+
+      {showSettings && canConfigure && agent && (
+        <div className="ai-chat-settings-backdrop" onMouseDown={() => setShowSettings(false)}>
+          <section
+            className="ai-chat-settings"
+            onMouseDown={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Cấu hình ${agent.name}`}
+          >
+            <header>
+              <div>
+                <span className="ai-chat-eyebrow">AI Employee</span>
+                <h2>Cấu hình {agent.name}</h2>
+              </div>
+              <button type="button" onClick={() => setShowSettings(false)} aria-label="Đóng">
+                <X size={20} />
+              </button>
+            </header>
+            <div className="ai-chat-settings-content">
+              <label>
+                System prompt
+                <textarea rows={7} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
+              </label>
+              <label>
+                Tools được phép
+                <input value={tools} onChange={(event) => setTools(event.target.value)} />
+              </label>
+              <label>
+                Knowledge collections
+                <input value={collections} onChange={(event) => setCollections(event.target.value)} />
+              </label>
+              <label>
+                Hành động được phép
+                <input value={allowed} onChange={(event) => setAllowed(event.target.value)} />
+              </label>
+              <label>
+                Hành động cấm
+                <input value={denied} onChange={(event) => setDenied(event.target.value)} />
+              </label>
+            </div>
+            <footer>
+              <button type="button" className="secondary" onClick={() => setShowSettings(false)}>
+                Hủy
+              </button>
+              <button type="button" className="primary" disabled={busy} onClick={() => void saveConfiguration()}>
+                <Save size={16} /> Lưu cấu hình
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

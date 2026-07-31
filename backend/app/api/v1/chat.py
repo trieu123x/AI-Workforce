@@ -1,6 +1,7 @@
 """Persistent chat with AI Employees, citations, feedback and task conversion."""
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -129,6 +130,7 @@ def chat_with_agent(
         content=req.message.strip(),
         attachments=req.attachments,
     ))
+    conversation.updated_at = datetime.now(timezone.utc)
     db.commit()
 
     result = execute_agent_chat(
@@ -146,6 +148,7 @@ def chat_with_agent(
         tools_executed=result.get("tools_executed", []),
     )
     db.add(assistant_message)
+    conversation.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(assistant_message)
     return AgentChatResponse(
@@ -268,6 +271,7 @@ def regenerate_last_response(
         tools_executed=result.get("tools_executed", []),
     )
     db.add(assistant_message)
+    conversation.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(assistant_message)
     return AgentChatResponse(
