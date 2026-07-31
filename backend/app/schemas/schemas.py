@@ -1,7 +1,8 @@
 """Pydantic schemas for User and AIAgent endpoints."""
 
-from datetime import datetime
-from typing import Optional
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Literal, Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
 
@@ -34,6 +35,39 @@ class UserResponse(UserBase):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ProfilePreferences(BaseModel):
+    hobbies: list[str] = Field(default_factory=list, max_length=20)
+    preferred_language: str = Field(default="vi", min_length=2, max_length=10)
+    timezone: str = Field(default="Asia/Ho_Chi_Minh", min_length=2, max_length=60)
+    work_style: Optional[str] = Field(None, max_length=100)
+    theme: Literal["light", "dark", "system"] = "system"
+    communication_channels: list[str] = Field(default_factory=list, max_length=10)
+
+
+class SelfProfileUpdate(BaseModel):
+    full_name: Optional[str] = Field(None, min_length=2, max_length=255)
+    phone: Optional[str] = Field(None, max_length=30)
+    address: Optional[str] = Field(None, max_length=1000)
+    city: Optional[str] = Field(None, max_length=100)
+    country: Optional[str] = Field(None, max_length=100)
+    date_of_birth: Optional[date] = None
+    gender: Optional[Literal["male", "female", "non_binary", "prefer_not_to_say"]] = None
+    bio: Optional[str] = Field(None, max_length=2000)
+    emergency_contact_name: Optional[str] = Field(None, max_length=255)
+    emergency_contact_phone: Optional[str] = Field(None, max_length=30)
+    preferences: Optional[ProfilePreferences] = None
+
+
+class EmploymentProfileUpdate(BaseModel):
+    job_title: Optional[str] = Field(None, max_length=150)
+    employee_code: Optional[str] = Field(None, max_length=50)
+    hire_date: Optional[date] = None
+    monthly_salary: Optional[Decimal] = Field(None, ge=0, max_digits=18, decimal_places=2)
+    salary_currency: str = Field(default="VND", min_length=3, max_length=3)
+    leave_total_days: Optional[float] = Field(None, ge=0, le=365)
+    leave_used_days: Optional[float] = Field(None, ge=0, le=365)
 
 
 # ---------------------------------------------------------------------------

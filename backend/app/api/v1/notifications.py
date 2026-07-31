@@ -134,6 +134,24 @@ def read_all_notifications(
     return {"updated": len(notifications)}
 
 
+@router.delete("/{notification_id}", summary="Delete one current user's notification")
+def delete_notification(
+    notification_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    notification = db.query(Notification).filter(
+        Notification.id == notification_id,
+        Notification.tenant_id == current_user.tenant_id,
+        Notification.user_id == current_user.id,
+    ).first()
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    db.delete(notification)
+    db.commit()
+    return {"message": "Notification deleted"}
+
+
 @router.get("/preferences", summary="Get notification preferences")
 def get_notification_preferences(
     db: Session = Depends(get_db),

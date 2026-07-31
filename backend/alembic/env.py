@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Import all models so Alembic can detect them
 from app.core.database import Base  # noqa: F401
 from app.models.models import (  # noqa: F401
-    Tenant, User, AIAgent, AgentWorkflow, WorkflowApproval,
+    Tenant, User, UserProfile, AIAgent, AgentWorkflow, WorkflowApproval,
     UserMemory, LLMCostLog, DocumentChunk, AuditLog
 )
 

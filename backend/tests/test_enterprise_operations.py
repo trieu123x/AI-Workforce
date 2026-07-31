@@ -131,6 +131,37 @@ def test_notification_preferences_and_tenant_user_scope(
         assert cross_user.status_code == 404
 
 
+def test_notification_can_only_be_deleted_by_its_owner(
+    client, ceo_token_headers, employee_token_headers, transactional_db_session
+):
+    from app.models.models import Notification, User
+
+    employee = transactional_db_session.query(User).filter(
+        User.email == "employee@company.com"
+    ).one()
+    notification = Notification(
+        tenant_id=employee.tenant_id,
+        user_id=employee.id,
+        event_type="TASK_COMPLETED",
+        title="Delete notification test",
+        message="This notification belongs to the employee",
+        severity="SUCCESS",
+        payload={},
+        is_read=False,
+    )
+    transactional_db_session.add(notification)
+    transactional_db_session.commit()
+
+    forbidden = client.delete(
+        f"/api/v1/notifications/{notification.id}", headers=ceo_token_headers
+    )
+    assert forbidden.status_code == 404
+    deleted = client.delete(
+        f"/api/v1/notifications/{notification.id}", headers=employee_token_headers
+    )
+    assert deleted.status_code == 200
+
+
 def test_integration_least_privilege_lifecycle(
     client, ceo_token_headers, employee_token_headers
 ):

@@ -324,7 +324,11 @@ def test_pdf_upload_is_extracted_and_indexed(client, ceo_token_headers):
     response = client.post(
         "/api/v1/documents/upload",
         headers=ceo_token_headers,
-        data={"collection_name": "Product Policies", "department_access": "ALL"},
+        data={
+            "collection_name": "Product Policies",
+            "department_access": "ALL",
+            "duplicate_strategy": "replace",
+        },
         files={"file": ("warranty-policy.pdf", buffer.getvalue(), "application/pdf")},
     )
     assert response.status_code == 201

@@ -5,6 +5,7 @@ import re
 from typing import List, Dict, Any
 
 from app.core.config import settings
+from app.services.ai_service_client import get_ai_service_client
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,10 @@ def rerank_chunks(query_text: str, candidate_chunks: List[Dict[str, Any]], top_k
     """
     if not candidate_chunks:
         return []
+
+    ai_client = get_ai_service_client()
+    if ai_client.enabled:
+        return ai_client.rerank(query_text, candidate_chunks, top_k=top_k)
 
     query_words = set(re.findall(r'\w+', query_text.lower()))
     query_terms = query_words - _QUERY_STOPWORDS or query_words

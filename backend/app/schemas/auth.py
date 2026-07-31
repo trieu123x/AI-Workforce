@@ -51,6 +51,7 @@ class UserInToken(BaseModel):
     role: str
     department: str
     tenant_id: UUID
+    avatar_url: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

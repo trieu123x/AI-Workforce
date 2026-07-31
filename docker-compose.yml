@@ -27,6 +27,56 @@ services:
       timeout: 3s
       retries: 10
 
+  ai-service:
+    build:
+      context: ./apps/ai-service
+      dockerfile: Dockerfile
+    container_name: ai_workforce_ai_service
+    restart: always
+    environment:
+      AI_SERVICE_HOST: 0.0.0.0
+      AI_SERVICE_PORT: 8100
+      AI_SERVICE_INTERNAL_TOKEN: ${AI_SERVICE_INTERNAL_TOKEN:-}
+      EMBEDDING_BACKEND: ${AI_EMBEDDING_BACKEND:-sentence_transformers}
+      EMBEDDING_MODEL_NAME: ${AI_EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
+      EMBEDDING_VERSION: ${AI_EMBEDDING_VERSION:-qwen3-embedding-v1}
+      EMBEDDING_DIMENSION: ${AI_EMBEDDING_DIMENSION:-1024}
+      EMBEDDING_BATCH_SIZE: ${AI_EMBEDDING_BATCH_SIZE:-8}
+      EMBEDDING_DEVICE: ${AI_EMBEDDING_DEVICE:-cuda}
+      EMBEDDING_DTYPE: ${AI_EMBEDDING_DTYPE:-float16}
+      EMBEDDING_CACHE_FOLDER: /models/huggingface/hub
+      EMBEDDING_LOCAL_FILES_ONLY: ${AI_EMBEDDING_LOCAL_FILES_ONLY:-false}
+      RERANK_BACKEND: ${AI_RERANK_BACKEND:-qwen3}
+      RERANK_MODEL_NAME: ${AI_RERANK_MODEL_NAME:-Qwen/Qwen3-Reranker-0.6B}
+      RERANK_DEVICE: ${AI_RERANK_DEVICE:-cuda}
+      RERANK_DTYPE: ${AI_RERANK_DTYPE:-float16}
+      RERANK_CACHE_FOLDER: /models/huggingface/hub
+      RERANK_LOCAL_FILES_ONLY: ${AI_RERANK_LOCAL_FILES_ONLY:-false}
+      RERANK_BATCH_SIZE: ${AI_RERANK_BATCH_SIZE:-2}
+      RERANK_MAX_LENGTH: ${AI_RERANK_MAX_LENGTH:-2048}
+      RERANK_CANDIDATE_LIMIT: ${AI_RERANK_CANDIDATE_LIMIT:-30}
+      RERANK_MIN_MODEL_SCORE: ${AI_RERANK_MIN_MODEL_SCORE:-0.15}
+      RERANK_MODEL_WEIGHT: ${AI_RERANK_MODEL_WEIGHT:-0.90}
+      RERANK_FALLBACK_ENABLED: ${AI_RERANK_FALLBACK_ENABLED:-true}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_AI_API_KEY: ${GOOGLE_AI_API_KEY:-}
+    ports:
+      - "8100:8100"
+    volumes:
+      - hf_models:/models/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
   backend:
     build:
       context: ./backend
@@ -46,10 +96,18 @@ services:
       DATABASE_URL: ""
       REDIS_URL: redis://redis:6379/0
       FRONTEND_URL: http://localhost:3000
+      AI_SERVICE_URL: http://ai-service:8100
+      AI_SERVICE_INTERNAL_TOKEN: ${AI_SERVICE_INTERNAL_TOKEN:-}
+      EMBEDDING_BACKEND: ${AI_EMBEDDING_BACKEND:-sentence_transformers}
+      EMBEDDING_MODEL_NAME: ${AI_EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
+      EMBEDDING_VERSION: ${AI_EMBEDDING_VERSION:-qwen3-embedding-v1}
+      EMBEDDING_DIMENSION: ${AI_EMBEDDING_DIMENSION:-1024}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      ai-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
@@ -73,10 +131,18 @@ services:
       POSTGRES_PORT: 5432
       DATABASE_URL: ""
       REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai-service:8100
+      AI_SERVICE_INTERNAL_TOKEN: ${AI_SERVICE_INTERNAL_TOKEN:-}
+      EMBEDDING_BACKEND: ${AI_EMBEDDING_BACKEND:-sentence_transformers}
+      EMBEDDING_MODEL_NAME: ${AI_EMBEDDING_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
+      EMBEDDING_VERSION: ${AI_EMBEDDING_VERSION:-qwen3-embedding-v1}
+      EMBEDDING_DIMENSION: ${AI_EMBEDDING_DIMENSION:-1024}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      ai-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "from app.services.work_queue import queue_stats; assert queue_stats()['worker_online']"]
@@ -100,3 +166,4 @@ services:
 
 volumes:
   pgdata:
+  hf_models:

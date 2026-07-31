@@ -190,6 +190,113 @@ def test_ingest_text_document(client, ceo_token_headers):
     assert data["chunks_created"] > 0
 
 
+def test_document_processing_status(client, ceo_token_headers):
+    document_id = "processing-status-policy.md"
+    ingested = client.post(
+        "/api/v1/documents/ingest-text",
+        data={
+            "document_name": document_id,
+            "content": "# Quy trinh\nTai lieu dung de kiem tra trang thai xu ly.",
+            "department_access": "ALL",
+        },
+        headers=ceo_token_headers,
+    )
+    assert ingested.status_code == 200
+
+    response = client.get(
+        f"/api/v1/documents/processing-status/{document_id}",
+        headers=ceo_token_headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["document_id"] == document_id
+    assert payload["processing_status"] == "ready"
+    assert payload["processing_progress"] == 100
+    assert payload["chunk_count"] == ingested.json()["chunks_created"]
+    assert payload["error_message"] is None
+
+
+def test_upload_duplicate_chunks_requires_explicit_replace_or_keep_old(
+    client, ceo_token_headers, transactional_db_session
+):
+    filename = "duplicate-decision-policy.md"
+    content = (
+        "# Chính sách thử nghiệm\n"
+        "Nội dung duy nhất dùng để kiểm tra cảnh báo chunk trùng.\n"
+        "## Quy trình\n"
+        "Bước 1: Người dùng tải tài liệu lên hệ thống."
+    ).encode("utf-8")
+    request_data = {
+        "department_access": "ALL",
+        "collection_name": "Duplicate Tests",
+        "document_id": "duplicate-decision-policy",
+        "version": "1.0",
+    }
+
+    first = client.post(
+        "/api/v1/documents/upload",
+        data=request_data,
+        files={"file": (filename, content, "text/markdown")},
+        headers=ceo_token_headers,
+    )
+    assert first.status_code == 201
+    transactional_db_session.expire_all()
+    original_chunks = transactional_db_session.query(DocumentChunk).filter(
+        DocumentChunk.document_id == "duplicate-decision-policy",
+        DocumentChunk.version == "1.0",
+    ).order_by(DocumentChunk.chunk_index).all()
+    original_ids = [chunk.id for chunk in original_chunks]
+
+    conflict = client.post(
+        "/api/v1/documents/upload",
+        data=request_data,
+        files={"file": (filename, content, "text/markdown")},
+        headers=ceo_token_headers,
+    )
+    assert conflict.status_code == 409
+    detail = conflict.json()["detail"]
+    assert detail["code"] == "DUPLICATE_CHUNKS"
+    assert detail["duplicate_count"] == detail["incoming_chunk_count"] == len(original_chunks)
+    assert [item["incoming"]["chunk_index"] for item in detail["duplicates"]] == list(
+        range(len(original_chunks))
+    )
+    assert all(item["content"] for item in detail["duplicates"])
+
+    kept = client.post(
+        "/api/v1/documents/upload",
+        data={**request_data, "duplicate_strategy": "keep_old"},
+        files={"file": (filename, content, "text/markdown")},
+        headers=ceo_token_headers,
+    )
+    assert kept.status_code == 200
+    assert kept.json()["status"] == "KEPT_EXISTING"
+    transactional_db_session.expire_all()
+    kept_ids = [
+        chunk.id
+        for chunk in transactional_db_session.query(DocumentChunk).filter(
+            DocumentChunk.document_id == "duplicate-decision-policy",
+            DocumentChunk.version == "1.0",
+        ).order_by(DocumentChunk.chunk_index).all()
+    ]
+    assert kept_ids == original_ids
+
+    replaced = client.post(
+        "/api/v1/documents/upload",
+        data={**request_data, "duplicate_strategy": "replace"},
+        files={"file": (filename, content, "text/markdown")},
+        headers=ceo_token_headers,
+    )
+    assert replaced.status_code == 201
+    transactional_db_session.expire_all()
+    replacement_chunks = transactional_db_session.query(DocumentChunk).filter(
+        DocumentChunk.document_id == "duplicate-decision-policy",
+        DocumentChunk.version == "1.0",
+    ).order_by(DocumentChunk.chunk_index).all()
+    assert len(replacement_chunks) == len(original_chunks)
+    assert [chunk.id for chunk in replacement_chunks] != original_ids
+
+
 def test_hybrid_rag_search(client, ceo_token_headers):
     """Test Hybrid RAG search returning top scored chunks."""
     payload = {
@@ -307,6 +414,20 @@ def test_document_lifecycle_hash_dedup_and_version_reuse(
     ).all()
     stable_hash = calculate_content_hash(first_chunks[0].content)
     stable_vector = list(first_chunks[0].embedding)
+
+    reindexed = client.post(
+        "/api/v1/documents/ingest-text",
+        data=base_payload,
+        headers=ceo_token_headers,
+    )
+    assert reindexed.status_code == 200
+    transactional_db_session.expire_all()
+    same_version_chunks = transactional_db_session.query(DocumentChunk).filter(
+        DocumentChunk.document_id == "versioned-policy",
+        DocumentChunk.version == "1.0",
+    ).all()
+    assert len(same_version_chunks) == reindexed.json()["chunks_created"] == 2
+    assert sorted(chunk.chunk_index for chunk in same_version_chunks) == [0, 1]
 
     second_payload = dict(base_payload)
     second_payload.update({

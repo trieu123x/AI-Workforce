@@ -1,6 +1,7 @@
 from app.models.models import (
     Tenant,
     User,
+    UserProfile,
     AIAgent,
     AgentWorkflow,
     WorkflowApproval,
@@ -24,6 +25,7 @@ from app.models.models import (
 __all__ = [
     "Tenant",
     "User",
+    "UserProfile",
     "AIAgent",
     "AgentWorkflow",
     "WorkflowApproval",

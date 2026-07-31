@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.services.ai_service_client import get_ai_service_client
 
 _TOKEN_PATTERN = re.compile(r"\S+")
 
@@ -41,6 +42,7 @@ class EmbeddingService:
         self.max_retries = settings.EMBEDDING_MAX_RETRIES
         self.version = settings.EMBEDDING_VERSION
         self._model = None
+        self._remote_max_input_tokens: int | None = None
 
     @property
     def model_name(self) -> str:
@@ -50,12 +52,21 @@ class EmbeddingService:
 
     @property
     def max_input_tokens(self) -> int:
+        ai_client = get_ai_service_client()
+        if ai_client.enabled:
+            if self._remote_max_input_tokens is None:
+                self._remote_max_input_tokens = int(
+                    ai_client.count_tokens([""])["max_input_tokens"]
+                )
+            return self._remote_max_input_tokens
         model = self._load_model()
         if model is None:
             return 8192
         return int(getattr(model, "max_seq_length", 8192))
 
     def _load_model(self):
+        if get_ai_service_client().enabled:
+            return None
         if self._model is not None:
             return self._model
         if self.backend != "sentence_transformers":
@@ -90,15 +101,28 @@ class EmbeddingService:
         return self._model
 
     def count_tokens(self, text: str) -> int:
+        return self.count_tokens_batch([text])[0]
+
+    def count_tokens_batch(self, texts: list[str]) -> list[int]:
+        if not texts:
+            return []
+        ai_client = get_ai_service_client()
+        if ai_client.enabled:
+            result = ai_client.count_tokens(texts)
+            self._remote_max_input_tokens = int(result["max_input_tokens"])
+            counts = [int(count) for count in result["token_counts"]]
+            if len(counts) != len(texts):
+                raise RuntimeError("AI service token count does not match input count")
+            return counts
         model = self._load_model()
         if model is None:
-            return len(_TOKEN_PATTERN.findall(text))
+            return [len(_TOKEN_PATTERN.findall(text)) for text in texts]
         encoded = model.tokenizer(
-            text,
+            texts,
             add_special_tokens=True,
             truncation=False,
         )
-        return len(encoded["input_ids"])
+        return [len(input_ids) for input_ids in encoded["input_ids"]]
 
     def _deterministic_embedding(self, text: str) -> list[float]:
         text_bytes = text.encode("utf-8")
@@ -111,6 +135,12 @@ class EmbeddingService:
         return [value / norm for value in vector] if norm else vector
 
     def _embed_once(self, texts: list[str]) -> list[list[float]]:
+        ai_client = get_ai_service_client()
+        if ai_client.enabled:
+            result = ai_client.embed(texts)
+            if int(result["dimension"]) != self.dimension:
+                raise RuntimeError("AI service embedding dimension mismatch")
+            return list(result["vectors"])
         model = self._load_model()
         if model is None:
             return [self._deterministic_embedding(text) for text in texts]
@@ -144,6 +174,12 @@ class EmbeddingService:
         ) from last_error
 
     def embed_query(self, question: str) -> list[float]:
+        ai_client = get_ai_service_client()
+        if ai_client.enabled:
+            result = ai_client.embed([question], input_type="query")
+            if int(result["dimension"]) != self.dimension:
+                raise RuntimeError("AI service embedding dimension mismatch")
+            return list(result["vectors"][0])
         query_text = (
             "Truy xuất tài liệu nội bộ phù hợp để trả lời câu hỏi:\n"
             f"{question.strip()}"

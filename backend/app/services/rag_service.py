@@ -20,6 +20,7 @@ from app.services.embedding_service import (
     get_embedding_service,
 )
 from app.services.reranker_service import rerank_chunks
+from app.services.ai_service_client import get_ai_service_client
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +237,14 @@ def chunk_document_content(
         raise ValueError("chunk_size must be greater than zero")
     if chunk_overlap < 0 or chunk_overlap >= chunk_size:
         raise ValueError("chunk_overlap must be between zero and chunk_size - 1")
+
+    ai_client = get_ai_service_client()
+    if ai_client.enabled:
+        return ai_client.chunk_document(
+            content,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
 
     chunks: list[dict[str, Any]] = []
     cleaned_content = clean_document_text(content)
@@ -584,6 +593,7 @@ def ingest_document(
     record.document_type = document_type
     record.status = status
     record.processing_status = "chunking"
+    record.processing_progress = 0
     record.confidentiality = confidentiality
     record.allowed_roles = normalized_roles
     record.effective_date = effective_date
@@ -597,20 +607,6 @@ def ingest_document(
     db.commit()
 
     try:
-        if status == "active":
-            db.query(KnowledgeDocument).filter(
-                KnowledgeDocument.tenant_id == tenant_id,
-                KnowledgeDocument.document_id == resolved_document_id,
-                KnowledgeDocument.version != version,
-                KnowledgeDocument.status == "active",
-            ).update({KnowledgeDocument.status: "inactive"}, synchronize_session=False)
-            db.query(DocumentChunk).filter(
-                DocumentChunk.tenant_id == tenant_id,
-                DocumentChunk.document_id == resolved_document_id,
-                DocumentChunk.version != version,
-                DocumentChunk.status == "active",
-            ).update({DocumentChunk.status: "inactive"}, synchronize_session=False)
-
         previous_chunks = db.query(DocumentChunk).filter(
             DocumentChunk.tenant_id == tenant_id,
             DocumentChunk.document_id == resolved_document_id,
@@ -623,11 +619,6 @@ def ingest_document(
             for chunk in previous_chunks
             if chunk.content_hash and chunk.embedding_text and chunk.embedding is not None
         }
-        db.query(DocumentChunk).filter(
-            DocumentChunk.tenant_id == tenant_id,
-            DocumentChunk.document_id == resolved_document_id,
-            DocumentChunk.version == version,
-        ).delete(synchronize_session=False)
 
         document_chunks = chunk_document_content(content)
         prepared_chunks: list[dict[str, Any]] = []
@@ -644,23 +635,36 @@ def ingest_document(
                 "section_title": chunk_data["section_title"],
                 "content": chunk_data["content"],
             })
-            embedding_token_count = embedding_service.count_tokens(embedding_text)
-            if embedding_token_count > embedding_service.max_input_tokens:
-                raise ValueError(
-                    f"Embedding input exceeds model limit: {embedding_token_count} > "
-                    f"{embedding_service.max_input_tokens}"
-                )
             prepared_chunks.append({
                 **chunk_data,
                 "content_hash": content_hash,
                 "embedding_text": embedding_text,
-                "embedding_token_count": embedding_token_count,
+                "embedding_token_count": 0,
                 "embedding": reusable_vectors.get((content_hash, embedding_text)),
             })
 
+        token_counts = embedding_service.count_tokens_batch([
+            chunk["embedding_text"] for chunk in prepared_chunks
+        ])
+        max_input_tokens = embedding_service.max_input_tokens
+        for chunk_data, embedding_token_count in zip(prepared_chunks, token_counts):
+            if embedding_token_count > max_input_tokens:
+                raise ValueError(
+                    f"Embedding input exceeds model limit: {embedding_token_count} > "
+                    f"{max_input_tokens}"
+                )
+            chunk_data["embedding_token_count"] = embedding_token_count
+
+        record.processing_progress = 100
+        db.commit()
         record.processing_status = "embedding"
+        record.processing_progress = 0
         db.commit()
         pending = [chunk for chunk in prepared_chunks if chunk["embedding"] is None]
+        total_pending = len(pending)
+        if total_pending == 0:
+            record.processing_progress = 100
+            db.commit()
         for batch_start in range(0, len(pending), embedding_service.batch_size):
             batch = pending[batch_start:batch_start + embedding_service.batch_size]
             vectors = embedding_service.embed_texts([
@@ -668,8 +672,65 @@ def ingest_document(
             ])
             for chunk_data, vector in zip(batch, vectors):
                 chunk_data["embedding"] = vector
+            embedded_count = min(batch_start + len(batch), total_pending)
+            record.processing_progress = round((embedded_count / total_pending) * 100)
+            db.commit()
 
         record.processing_status = "indexing"
+        record.processing_progress = 0
+        db.commit()
+
+        # Serialize the short replacement transaction for this document version.
+        # Embedding is deliberately completed before taking the row lock so other
+        # requests and RAG reads are not blocked by model inference. If two uploads
+        # race, the second transaction replaces the first batch instead of appending
+        # another set of chunks.
+        record = (
+            db.query(KnowledgeDocument)
+            .filter(KnowledgeDocument.id == record.id)
+            .populate_existing()
+            .with_for_update()
+            .one()
+        )
+        record.file_name = resolved_source_file
+        record.document_title = resolved_document_title
+        record.department = department_access
+        record.document_type = document_type
+        record.status = status
+        record.processing_status = "indexing"
+        record.processing_progress = 0
+        record.confidentiality = confidentiality
+        record.allowed_roles = normalized_roles
+        record.effective_date = effective_date
+        record.expiration_date = expiration_date
+        record.storage_key = storage_key or record.storage_key
+        record.source_url = source_url
+        record.source_hash = source_hash or calculate_content_hash(content)
+        record.embedding_model = embedding_service.model_name
+        record.embedding_version = embedding_service.version
+        record.error_message = None
+
+        if status == "active":
+            db.query(KnowledgeDocument).filter(
+                KnowledgeDocument.tenant_id == tenant_id,
+                KnowledgeDocument.document_id == resolved_document_id,
+                KnowledgeDocument.version != version,
+                KnowledgeDocument.status == "active",
+            ).update({KnowledgeDocument.status: "inactive"}, synchronize_session=False)
+            db.query(DocumentChunk).filter(
+                DocumentChunk.tenant_id == tenant_id,
+                DocumentChunk.document_id == resolved_document_id,
+                DocumentChunk.version != version,
+                DocumentChunk.status == "active",
+            ).update({DocumentChunk.status: "inactive"}, synchronize_session=False)
+
+        db.query(DocumentChunk).filter(
+            DocumentChunk.tenant_id == tenant_id,
+            DocumentChunk.document_id == resolved_document_id,
+            DocumentChunk.version == version,
+        ).delete(synchronize_session=False)
+        db.flush()
+
         chunks_created: list[DocumentChunk] = []
         for idx, chunk_data in enumerate(prepared_chunks):
             page_start = chunk_data["page"]
@@ -737,6 +798,7 @@ def ingest_document(
 
         record.chunk_count = len(chunks_created)
         record.processing_status = "ready"
+        record.processing_progress = 100
         db.commit()
         return chunks_created
     except Exception as exc:

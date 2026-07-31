@@ -5,6 +5,7 @@ All tables defined per enterprise specification (Multi-tenant, Tasks, Agents, Wo
 
 import uuid
 from datetime import date, datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
@@ -136,6 +137,52 @@ class User(Base):
     workflows: Mapped[list["AgentWorkflow"]] = relationship("AgentWorkflow", back_populates="initiator")
     approvals: Mapped[list["WorkflowApproval"]] = relationship("WorkflowApproval", back_populates="approver")
     memories: Mapped[list["UserMemory"]] = relationship("UserMemory", back_populates="user", cascade="all, delete-orphan")
+    profile: Mapped["UserProfile | None"] = relationship(
+        "UserProfile", back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class UserProfile(Base):
+    """Personal and employment profile separated from authentication data."""
+
+    __tablename__ = "user_profiles"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_user_profile_user"),
+        Index("idx_user_profiles_tenant", "tenant_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    phone: Mapped[str | None] = mapped_column(String(30))
+    address: Mapped[str | None] = mapped_column(Text)
+    city: Mapped[str | None] = mapped_column(String(100))
+    country: Mapped[str | None] = mapped_column(String(100))
+    date_of_birth: Mapped[date | None] = mapped_column(Date)
+    gender: Mapped[str | None] = mapped_column(String(30))
+    bio: Mapped[str | None] = mapped_column(Text)
+    emergency_contact_name: Mapped[str | None] = mapped_column(String(255))
+    emergency_contact_phone: Mapped[str | None] = mapped_column(String(30))
+    preferences: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    job_title: Mapped[str | None] = mapped_column(String(150))
+    employee_code: Mapped[str | None] = mapped_column(String(50))
+    hire_date: Mapped[date | None] = mapped_column(Date)
+    monthly_salary: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    salary_currency: Mapped[str] = mapped_column(String(3), nullable=False, default="VND")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="profile")
 
 
 # ============================================================
@@ -640,6 +687,10 @@ class KnowledgeDocument(Base):
             "processing_status IN ('uploaded', 'parsing', 'chunking', 'embedding', 'indexing', 'ready', 'failed')",
             name="ck_knowledge_documents_processing_status",
         ),
+        CheckConstraint(
+            "processing_progress >= 0 AND processing_progress <= 100",
+            name="ck_knowledge_documents_processing_progress",
+        ),
         Index("idx_knowledge_documents_tenant_status", "tenant_id", "status"),
     )
 
@@ -658,6 +709,9 @@ class KnowledgeDocument(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     processing_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="uploaded"
+    )
+    processing_progress: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
     )
     confidentiality: Mapped[str] = mapped_column(
         String(30), nullable=False, default="internal"
@@ -712,6 +766,11 @@ class DocumentChunk(Base):
             "embedding",
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+        UniqueConstraint(
+            "knowledge_document_id",
+            "chunk_index",
+            name="uq_document_chunks_document_index",
         ),
     )
 

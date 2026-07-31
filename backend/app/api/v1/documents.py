@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import AnyHttpUrl, BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -24,7 +24,12 @@ from app.core.database import get_db
 from app.core.security import get_current_active_user
 from app.models.models import DocumentChunk, KnowledgeDocument, User
 from app.services.knowledge_storage import save_original_file
-from app.services.rag_service import hybrid_search_documents, ingest_document
+from app.services.embedding_service import calculate_content_hash
+from app.services.rag_service import (
+    chunk_document_content,
+    hybrid_search_documents,
+    ingest_document,
+)
 from app.services.notification_service import create_notification
 
 router = APIRouter(prefix="/documents", tags=["Knowledge Documents"])
@@ -33,6 +38,7 @@ VALID_DEPARTMENTS = {"BOARD", "HR", "LEGAL", "IT", "FINANCE", "SALES", "ALL"}
 VALID_DOCUMENT_STATUSES = {"draft", "active", "inactive", "archived"}
 VALID_CONFIDENTIALITY = {"public", "internal", "confidential", "restricted"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+VALID_DUPLICATE_STRATEGIES = {"prompt", "replace", "keep_old"}
 
 
 def _notify_indexed(db: Session, user: User, document_name: str, chunks: int) -> None:
@@ -165,6 +171,68 @@ def _governance_metadata(
     }
 
 
+def _duplicate_chunk_report(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    document_id: str,
+    version: str,
+    content: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return exact content-hash matches for the same logical document version."""
+    incoming_chunks = chunk_document_content(content)
+    incoming_by_hash: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, chunk in enumerate(incoming_chunks):
+        content_hash = calculate_content_hash(chunk["content"])
+        incoming_by_hash.setdefault(content_hash, []).append((index, chunk))
+
+    if not incoming_by_hash:
+        return [], len(incoming_chunks)
+
+    existing_chunks = (
+        db.query(DocumentChunk)
+        .filter(
+            DocumentChunk.tenant_id == tenant_id,
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.version == version,
+            DocumentChunk.content_hash.in_(list(incoming_by_hash)),
+        )
+        .order_by(DocumentChunk.created_at.desc())
+        .all()
+    )
+    existing_by_hash: dict[str, DocumentChunk] = {}
+    for chunk in existing_chunks:
+        if chunk.content_hash:
+            existing_by_hash.setdefault(chunk.content_hash, chunk)
+
+    duplicates: list[dict[str, Any]] = []
+    for content_hash, incoming in incoming_by_hash.items():
+        existing = existing_by_hash.get(content_hash)
+        if not existing:
+            continue
+        for incoming_index, new_chunk in incoming:
+            duplicates.append({
+                "content_hash": content_hash,
+                "content": new_chunk["content"],
+                "incoming": {
+                    "chunk_index": incoming_index,
+                    "section_title": new_chunk["section_title"],
+                    "page_start": new_chunk["page"],
+                    "page_end": max(new_chunk["pages"]) if new_chunk["pages"] else new_chunk["page"],
+                },
+                "existing": {
+                    "chunk_id": str(existing.id),
+                    "chunk_index": existing.chunk_index,
+                    "section_title": existing.section_title or "Untitled section",
+                    "page_start": existing.page_start or existing.page,
+                    "page_end": existing.page_end or existing.page,
+                    "created_at": existing.created_at.isoformat() if existing.created_at else None,
+                },
+            })
+    duplicates.sort(key=lambda item: item["incoming"]["chunk_index"])
+    return duplicates, len(incoming_chunks)
+
+
 def _set_document_processing_status(
     db: Session,
     *,
@@ -177,6 +245,7 @@ def _set_document_processing_status(
     version: str,
     governance: dict[str, Any],
     processing_status: str,
+    processing_progress: int = 0,
     storage_key: str | None = None,
     source_hash: str | None = None,
     source_url: str | None = None,
@@ -202,6 +271,7 @@ def _set_document_processing_status(
     record.version = version
     record.status = governance["status"]
     record.processing_status = processing_status
+    record.processing_progress = max(0, min(100, processing_progress))
     record.confidentiality = governance["confidentiality"]
     record.allowed_roles = governance["allowed_roles"]
     record.effective_date = governance["effective_date"]
@@ -450,6 +520,7 @@ def list_documents(
             ),
             "document_status": document.status,
             "processing_status": document.processing_status,
+            "processing_progress": document.processing_progress,
             "confidentiality": document.confidentiality,
             "allowed_roles": document.allowed_roles or [],
             "source_file": document.file_name,
@@ -485,6 +556,46 @@ def list_documents(
         if key not in record_keys:
             item["chunk_count"] += 1
     return list(docs.values())
+
+
+@router.get(
+    "/processing-status/{document_id}",
+    summary="Get the current document processing stage",
+)
+def get_document_processing_status(
+    document_id: str,
+    version: str = "1.0",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> dict[str, Any]:
+    """Expose committed ingestion stages so the uploader can show real progress."""
+    if current_user.role not in KB_MANAGERS:
+        raise HTTPException(status_code=403, detail="Insufficient permission to manage knowledge")
+
+    record = db.query(KnowledgeDocument).filter(
+        KnowledgeDocument.tenant_id == current_user.tenant_id,
+        KnowledgeDocument.document_id == document_id,
+        KnowledgeDocument.version == version,
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Document processing status not found")
+    if current_user.role == "Manager" and record.department not in {
+        "ALL",
+        current_user.department,
+    }:
+        raise HTTPException(status_code=404, detail="Document processing status not found")
+
+    return {
+        "document_id": record.document_id,
+        "document_name": record.file_name,
+        "version": record.version,
+        "processing_status": record.processing_status,
+        "processing_progress": record.processing_progress,
+        "chunk_count": record.chunk_count,
+        "embedding_model": record.embedding_model,
+        "error_message": record.error_message,
+        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+    }
 
 
 @router.post("/search", response_model=list[DocumentChunkResponse], summary="Search knowledge")
@@ -567,6 +678,7 @@ def ingest_text_document(
 
 @router.post("/upload", status_code=201, summary="Upload PDF, DOCX, TXT or CSV")
 def upload_document(
+    response: Response,
     file: UploadFile = File(...),
     department_access: str = Form("ALL"),
     collection_name: str = Form("General Knowledge"),
@@ -579,10 +691,14 @@ def upload_document(
     status: str = Form("active"),
     confidentiality: str = Form("internal"),
     allowed_roles: str = Form(""),
+    duplicate_strategy: str = Form("prompt"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> dict:
     department = _validate_management(current_user, department_access)
+    normalized_duplicate_strategy = duplicate_strategy.strip().lower()
+    if normalized_duplicate_strategy not in VALID_DUPLICATE_STRATEGIES:
+        raise HTTPException(status_code=422, detail="Unsupported duplicate strategy")
     # This endpoint performs PDF parsing and local model inference. Keeping the
     # handler synchronous lets FastAPI run it in its worker thread pool instead
     # of blocking the async event loop for the duration of embedding.
@@ -602,6 +718,55 @@ def upload_document(
     resolved_type = document_type.strip().lower()
     resolved_version = version.strip()
     try:
+        content = _extract_file_text(filename, data).strip()
+        if not content:
+            raise HTTPException(status_code=422, detail="No readable text found in the file")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="Text file must use UTF-8 encoding") from exc
+
+    duplicates, incoming_chunk_count = _duplicate_chunk_report(
+        db,
+        tenant_id=current_user.tenant_id,
+        document_id=resolved_document_id,
+        version=resolved_version,
+        content=content,
+    )
+    if duplicates and normalized_duplicate_strategy == "prompt":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DUPLICATE_CHUNKS",
+                "message": "Tài liệu có các chunk trùng với phiên bản đang được lưu.",
+                "document_id": resolved_document_id,
+                "document_name": filename,
+                "version": resolved_version,
+                "duplicate_count": len(duplicates),
+                "incoming_chunk_count": incoming_chunk_count,
+                "duplicates": duplicates,
+                "actions": ["replace", "keep_old"],
+            },
+        )
+    if duplicates and normalized_duplicate_strategy == "keep_old":
+        existing_record = db.query(KnowledgeDocument).filter(
+            KnowledgeDocument.tenant_id == current_user.tenant_id,
+            KnowledgeDocument.document_id == resolved_document_id,
+            KnowledgeDocument.version == resolved_version,
+        ).first()
+        response.status_code = 200
+        return {
+            "success": True,
+            "document_id": resolved_document_id,
+            "document_name": filename,
+            "status": "KEPT_EXISTING",
+            "processing_status": (
+                existing_record.processing_status if existing_record else "ready"
+            ),
+            "processing_progress": 100,
+            "chunks_created": 0,
+            "duplicate_count": len(duplicates),
+        }
+
+    try:
         storage_key, source_hash = save_original_file(
             tenant_id=current_user.tenant_id,
             document_id=resolved_document_id,
@@ -611,7 +776,7 @@ def upload_document(
         )
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Could not store uploaded file") from exc
-    record = _set_document_processing_status(
+    _set_document_processing_status(
         db,
         user=current_user,
         document_id=resolved_document_id,
@@ -625,15 +790,6 @@ def upload_document(
         storage_key=storage_key,
         source_hash=source_hash,
     )
-    try:
-        content = _extract_file_text(filename, data).strip()
-        if not content:
-            raise HTTPException(status_code=422, detail="No readable text found in the file")
-    except Exception as exc:
-        record.processing_status = "failed"
-        record.error_message = str(exc)[:2000]
-        db.commit()
-        raise
     chunks = ingest_document(
         db=db,
         tenant_id=current_user.tenant_id,

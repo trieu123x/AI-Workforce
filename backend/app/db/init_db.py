@@ -63,6 +63,7 @@ def init_db():
         "ALTER TABLE ai_agents ADD COLUMN IF NOT EXISTS allowed_actions JSONB DEFAULT '[]'::jsonb",
         "ALTER TABLE ai_agents ADD COLUMN IF NOT EXISTS disallowed_actions JSONB DEFAULT '[]'::jsonb",
         "ALTER TABLE ai_agents ADD COLUMN IF NOT EXISTS knowledge_access JSONB DEFAULT '[]'::jsonb",
+        "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS processing_progress INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS document_id VARCHAR(100)",
         "ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS collection_name VARCHAR(100) DEFAULT 'General Knowledge'",
         "ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS document_title VARCHAR(255)",

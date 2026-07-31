@@ -13,6 +13,7 @@ __pycache__/
 backend/venv/
 backend/.venv/
 backend/data/
+apps/ai-service/.cache/
 
 # Node.js / Next.js
 node_modules/

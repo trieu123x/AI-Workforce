@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     MINIO_ACCESS_KEY: Optional[str] = None
     MINIO_SECRET_KEY: Optional[str] = None
     KNOWLEDGE_STORAGE_PATH: str = "data/knowledge"
+    CLOUDINARY_URL: Optional[str] = None
+
+    # --- Internal AI service ---
+    AI_SERVICE_URL: Optional[str] = None
+    AI_SERVICE_INTERNAL_TOKEN: Optional[str] = None
+    AI_SERVICE_TIMEOUT_SECONDS: float = 120.0
 
     # --- Knowledge embeddings ---
     EMBEDDING_BACKEND: str = "deterministic"

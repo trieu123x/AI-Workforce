@@ -1,0 +1,55 @@
+# AI Workforce AI Service
+
+Stateless service that owns AI-specific computation: semantic chunking, embeddings,
+reranking, prompt loading, provider routing, agent metadata and guardrails.
+
+The business backend remains the authority for tenants, ACL, database persistence,
+audit logs and tool execution. It sends only the minimum authorized payload to this
+service over the internal network.
+
+## Local run
+
+```powershell
+cd apps/ai-service
+python -m pip install -e ".[test]"
+uvicorn app.main:app --reload --port 8100
+```
+
+Install the local Hugging Face model runtime with:
+
+```powershell
+python -m pip install -e ".[huggingface,test]"
+```
+
+Main internal endpoints:
+
+- `POST /v1/rag/chunk`
+- `POST /v1/embeddings`
+- `POST /v1/token-count`
+- `POST /v1/rag/rerank`
+- `POST /v1/agents/route`
+- `POST /v1/llm/generate`
+
+Set `AI_SERVICE_INTERNAL_TOKEN` in both services outside local development.
+
+## BGE reranking
+
+Docker enables `BAAI/bge-reranker-v2-m3` by default (`RERANK_BACKEND=bge`). The model is lazy-loaded on
+the first rerank request and stored in the shared Hugging Face model volume. The
+pipeline deduplicates and caps hybrid candidates, scores query/document pairs in
+batches, converts logits to 0-1 probabilities, fuses a small retrieval prior and
+returns the configured `top_k` results.
+
+Use `RERANK_BACKEND=lexical` for lightweight local tests. If BGE inference fails,
+`RERANK_FALLBACK_ENABLED=true` keeps retrieval available and marks
+`fallback_used=true` in the API response.
+
+Docker is configured for one NVIDIA GPU with CUDA 12.4 PyTorch wheels. The RTX
+3060 6 GB profile uses FP16, embedding batch 8, rerank batch 2 and a 2048-token
+rerank window. Check the active runtime with `GET /health/accelerator`. Reranking
+automatically retries CUDA out-of-memory errors with a smaller batch before using
+the configured fallback.
+
+run:
+cd C:\Users\admin\Downloads\code_ai\AI-workforce\apps\ai-service
+python -m uvicorn app.main:app --reload --port 8100

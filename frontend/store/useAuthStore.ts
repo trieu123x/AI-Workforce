@@ -15,6 +15,7 @@ interface UserInfo {
   role: string;
   department: string;
   tenant_id: string;
+  avatar_url?: string | null;
 }
 
 interface AuthState {

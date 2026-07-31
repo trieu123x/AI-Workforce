@@ -2,8 +2,11 @@
 
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { useState } from "react";
+import Image from "next/image";
+import { useCallback, useEffect, useState } from "react";
 import { useAuthStore } from "@/store/useAuthStore";
+import api from "@/lib/api";
+import NotificationPanel from "@/components/NotificationPanel";
 import {
   Bot,
   LayoutDashboard,
@@ -15,11 +18,9 @@ import {
   TrendingUp,
   BookOpen,
   ChevronDown,
-  ChevronRight,
   Database,
   Settings,
   HelpCircle,
-  MessageCircle,
   Ticket,
   Calendar,
   BarChart3,
@@ -86,6 +87,9 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
   const router = useRouter();
   const pathname = usePathname();
   const { user, logout } = useAuthStore();
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const handleUnreadChange = useCallback((count: number) => setUnreadNotifications(count), []);
 
   // Accordion: which group is expanded
   const [expandedGroup, setExpandedGroup] = useState<string | null>(
@@ -100,9 +104,26 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
     router.push("/login");
   };
 
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    const loadUnread = async () => {
+      try {
+        const { data } = await api.get("/api/v1/notifications", { params: { limit: 1 } });
+        if (active) setUnreadNotifications(data.unread_count);
+      } catch {
+        // The sidebar remains usable when notifications are temporarily unavailable.
+      }
+    };
+    void loadUnread();
+    const interval = window.setInterval(() => void loadUnread(), 60_000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [user]);
+
   const isAgentsGroupActive = AGENTS.some((a) => pathname === a.path);
 
   return (
+    <>
     <aside
       style={{
         width: "270px",
@@ -118,57 +139,34 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
         zIndex: 50,
       }}
     >
-      {/* ── Logo Area ── */}
+      {/* ── Employee identity and notifications ── */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
           gap: "10px",
-          padding: "20px 24px",
+          padding: "14px 16px",
           borderBottom: "1px solid #F1F5F9",
           flexShrink: 0,
         }}
       >
-        {/* Icon */}
-        <div
-          style={{
-            width: "36px",
-            height: "36px",
-            borderRadius: "8px",
-            background: "linear-gradient(135deg, #3C50E0, #6366f1)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-            boxShadow: "0 4px 12px rgba(60,80,224,0.30)",
-          }}
-        >
-          <Bot size={20} color="#FFFFFF" />
-        </div>
-
-        {/* Brand text */}
-        <div>
-          <div
-            style={{
-              fontSize: "1.05rem",
-              fontWeight: 800,
-              color: "#1C2434",
-              letterSpacing: "-0.01em",
-              lineHeight: 1.2,
-            }}
-          >
-            AI Workforce
-          </div>
-          <div
-            style={{
-              fontSize: "0.68rem",
-              color: "#64748B",
-              marginTop: "1px",
-            }}
-          >
-            Enterprise Platform
-          </div>
-        </div>
+        <button onClick={() => router.push("/account")} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, padding: 0, border: 0, background: "transparent", cursor: "pointer", textAlign: "left" }}>
+          {user?.avatar_url ? (
+            <Image src={user.avatar_url} alt={user.full_name} width={38} height={38} unoptimized style={{ width: 38, height: 38, borderRadius: "50%", objectFit: "cover", border: "2px solid #E0E7FF" }}/>
+          ) : (
+            <span style={{ width: 38, height: 38, borderRadius: "50%", background: "linear-gradient(135deg,#3C50E0,#8B5CF6)", color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, flexShrink: 0 }}>
+              {user?.full_name?.charAt(0).toUpperCase() || "U"}
+            </span>
+          )}
+          <span style={{ minWidth: 0 }}>
+            <strong style={{ display: "block", fontSize: 13, color: "#1C2434", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user?.full_name || "Nhân viên"}</strong>
+            <span style={{ display: "block", fontSize: 11, color: "#64748B", marginTop: 2 }}>{user?.role || "Employee"} · {user?.department || "ALL"}</span>
+          </span>
+        </button>
+        <button onClick={() => setNotificationsOpen((current) => !current)} aria-label="Mở thông báo" title="Thông báo" style={{ width: 36, height: 36, borderRadius: 10, border: "1px solid #E2E8F0", background: notificationsOpen ? "#EEF2FF" : "#fff", color: notificationsOpen ? "#4F46E5" : "#64748B", cursor: "pointer", display: "grid", placeItems: "center", position: "relative", flexShrink: 0 }}>
+          <Bell size={17}/>
+          {unreadNotifications > 0 && <span style={{ position: "absolute", right: -5, top: -6, minWidth: 17, height: 17, padding: "0 4px", borderRadius: 9, background: "#EF4444", color: "#fff", fontSize: 9, fontWeight: 800, display: "grid", placeItems: "center", border: "2px solid #fff" }}>{unreadNotifications > 99 ? "99+" : unreadNotifications}</span>}
+        </button>
       </div>
 
       {/* ── Scrollable Nav ── */}
@@ -280,13 +278,6 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
           label="Audit Log"
           href="/audit-logs"
           active={pathname === "/audit-logs"}
-        />
-
-        <NavItem
-          icon={<Bell size={18} />}
-          label="Thông báo"
-          href="/notifications"
-          active={pathname === "/notifications"}
         />
 
         <NavItem
@@ -485,59 +476,6 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
           background: "#FAFBFC",
         }}
       >
-        {/* User card */}
-        {user && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "10px",
-              padding: "10px 12px",
-              borderRadius: "10px",
-              background: "#F1F5F9",
-              border: "1px solid #E2E8F0",
-              marginBottom: "8px",
-            }}
-          >
-            {/* Avatar */}
-            <div
-              style={{
-                width: "34px",
-                height: "34px",
-                borderRadius: "50%",
-                background: "linear-gradient(135deg, #3C50E0, #8b5cf6)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: "0.82rem",
-                fontWeight: 700,
-                color: "white",
-                flexShrink: 0,
-              }}
-            >
-              {user.full_name?.charAt(0).toUpperCase() || "U"}
-            </div>
-
-            <div style={{ flex: 1, overflow: "hidden" }}>
-              <div
-                style={{
-                  fontSize: "0.82rem",
-                  fontWeight: 700,
-                  color: "#1C2434",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {user.full_name}
-              </div>
-              <div style={{ fontSize: "0.69rem", color: "#64748B", marginTop: "1px" }}>
-                {user.role} · {user.department}
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* Logout */}
         <button
           id="logout-btn"
@@ -570,6 +508,8 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
         </button>
       </div>
     </aside>
+    <NotificationPanel open={notificationsOpen} onClose={() => setNotificationsOpen(false)} onUnreadChange={handleUnreadChange}/>
+    </>
   );
 }
 
