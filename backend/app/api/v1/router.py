@@ -21,6 +21,7 @@ from app.api.v1.workspace import router as workspace_router
 from app.api.v1.management import router as management_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.integrations import router as integrations_router
+from app.api.v1.customer_support import router as customer_support_router
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -43,3 +44,4 @@ api_router.include_router(workspace_router)
 api_router.include_router(management_router)
 api_router.include_router(notifications_router)
 api_router.include_router(integrations_router)
+api_router.include_router(customer_support_router)

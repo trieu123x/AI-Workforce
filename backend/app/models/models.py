@@ -269,6 +269,125 @@ class AgentWorkflow(Base):
     approvals: Mapped[list["WorkflowApproval"]] = relationship("WorkflowApproval", back_populates="workflow", cascade="all, delete-orphan")
     audit_logs: Mapped[list["AuditLog"]] = relationship("AuditLog", back_populates="workflow")
     llm_cost_logs: Mapped[list["LLMCostLog"]] = relationship("LLMCostLog", back_populates="workflow")
+    step_executions: Mapped[list["WorkflowStepExecution"]] = relationship(
+        "WorkflowStepExecution", back_populates="workflow", cascade="all, delete-orphan"
+    )
+
+
+class WorkflowStepExecution(Base):
+    """Durable, idempotent checkpoint for one workflow step."""
+
+    __tablename__ = "workflow_step_executions"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "step_key", name="uq_workflow_step_key"),
+        Index("idx_workflow_steps_status", "status", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_workflows.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    step_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    step_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    input_data: Mapped[dict] = mapped_column(JSONB, default=dict)
+    output_data: Mapped[dict] = mapped_column(JSONB, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    workflow: Mapped["AgentWorkflow"] = relationship(
+        "AgentWorkflow", back_populates="step_executions"
+    )
+
+
+class CustomerSupportCase(Base):
+    __tablename__ = "customer_support_cases"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_support_case_idempotency"),
+        Index("idx_support_cases_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_workflows.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_by_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    customer_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    customer_name: Mapped[str | None] = mapped_column(String(255))
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    inbound_body: Mapped[str] = mapped_column(Text, nullable=False)
+    classification: Mapped[str | None] = mapped_column(String(50))
+    confidence: Mapped[float | None] = mapped_column(Float)
+    draft_reply: Mapped[str | None] = mapped_column(Text)
+    citations: Mapped[dict] = mapped_column(JSONB, default=list)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="QUEUED")
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class OutboundMessage(Base):
+    __tablename__ = "outbound_messages"
+    __table_args__ = (
+        UniqueConstraint("support_case_id", "idempotency_key", name="uq_outbound_case_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    support_case_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("customer_support_cases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    recipient: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    delivery_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    provider_message_id: Mapped[str | None] = mapped_column(String(255))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 # ============================================================

@@ -15,6 +15,9 @@ from app.models.models import (
     NotificationPreference,
     IntegrationConnection,
     IntegrationUsageLog,
+    WorkflowStepExecution,
+    CustomerSupportCase,
+    OutboundMessage,
 )
 
 __all__ = [
@@ -34,4 +37,7 @@ __all__ = [
     "NotificationPreference",
     "IntegrationConnection",
     "IntegrationUsageLog",
+    "WorkflowStepExecution",
+    "CustomerSupportCase",
+    "OutboundMessage",
 ]

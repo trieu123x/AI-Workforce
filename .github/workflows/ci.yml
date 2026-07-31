@@ -68,6 +68,10 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - name: Apply migrations
         run: alembic upgrade head
+      - name: Validate API and worker entrypoints
+        run: |
+          python -m compileall -q app
+          python -c "import app.main; import app.worker"
       - name: Run backend tests
         run: pytest -q
 

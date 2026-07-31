@@ -26,6 +26,7 @@ import {
   ScrollText,
   Bell,
   Cable,
+  Headphones,
 } from "lucide-react";
 
 // ─── Nav Config ──────────────────────────────────────────────────────────────
@@ -248,6 +249,14 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
           label="Workflow Automation"
           href="/workflows"
           active={pathname === "/workflows"}
+        />
+
+        <NavItem
+          icon={<Headphones size={18} />}
+          label="Customer Support Ops"
+          href="/customer-support"
+          active={pathname === "/customer-support"}
+          badge="NEW"
         />
 
         {/* Trung Tâm Phê Duyệt */}

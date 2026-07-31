@@ -35,6 +35,19 @@ class Settings(BaseSettings):
 
     # --- Redis ---
     REDIS_URL: str = "redis://localhost:6379/0"
+    WORK_QUEUE_NAME: str = "ai-workforce:jobs"
+    WORK_QUEUE_PROCESSING_NAME: str = "ai-workforce:jobs:processing"
+    WORK_QUEUE_DEAD_LETTER_NAME: str = "ai-workforce:jobs:dead-letter"
+    WORKER_HEARTBEAT_KEY: str = "ai-workforce:worker:heartbeat"
+
+    # --- Email delivery ---
+    EMAIL_DELIVERY_MODE: str = "outbox"
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    SMTP_FROM_EMAIL: Optional[str] = None
+    SMTP_USE_TLS: bool = True
 
     # --- Storage ---
     MINIO_ENDPOINT: str = "localhost:9000"

@@ -11,8 +11,17 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import get_current_active_user
-from app.models.models import AgentWorkflow, AuditLog, User, UserMemory, WorkflowApproval
+from app.models.models import (
+    AgentWorkflow,
+    AuditLog,
+    CustomerSupportCase,
+    Task,
+    User,
+    UserMemory,
+    WorkflowApproval,
+)
 from app.services.notification_service import create_notification
+from app.services.work_queue import enqueue_job
 
 router = APIRouter(prefix="/approvals", tags=["Workflow Approvals"])
 APPROVER_ROLES = {"Owner", "Admin", "CEO", "Manager"}
@@ -92,8 +101,33 @@ def process_approval_action(
     approval.status = "APPROVED" if approved else "REJECTED"
     approval.comments = req.comments
     approval.approver_id = current_user.id
-    approval.workflow.status = "COMPLETED" if approved else "FAILED"
-    approval.workflow.completed_at = datetime.now(timezone.utc)
+    is_support_email = approval.action_type == "SUPPORT_EMAIL_SEND"
+    approval.workflow.status = (
+        "IN_PROGRESS" if approved and is_support_email
+        else "COMPLETED" if approved
+        else "FAILED"
+    )
+    approval.workflow.completed_at = (
+        None if approved and is_support_email else datetime.now(timezone.utc)
+    )
+
+    support_case = None
+    if is_support_email:
+        support_case = db.query(CustomerSupportCase).filter(
+            CustomerSupportCase.workflow_id == approval.workflow_id
+        ).first()
+        if support_case:
+            if req.action == "EDIT_AND_APPROVE" and req.edited_payload:
+                support_case.draft_reply = req.edited_payload.get(
+                    "draft_reply", support_case.draft_reply
+                )
+            support_case.status = "QUEUED" if approved else "REJECTED"
+            support_case.last_error = None if approved else (
+                req.comments or "Manager rejected the reply"
+            )
+            support_task = db.query(Task).filter(Task.id == support_case.task_id).first()
+            if support_task and not approved:
+                support_task.status = "CANCELLED"
 
     if approved and approval.action_type in {"XIN_NGHI_PHEP", "XIN NGHỈ PHÉP"}:
         request_payload = approval.payload or {}
@@ -149,6 +183,28 @@ def process_approval_action(
         dedup_key=f"approval-result:{approval.id}:{approval.status}",
     )
     db.commit()
+    if approved and is_support_email and support_case:
+        try:
+            enqueue_job(
+                "support.execute",
+                {"support_case_id": str(support_case.id)},
+                f"support:{support_case.id}:approval:{approval.id}",
+            )
+        except Exception as error:
+            support_case.status = "QUEUE_FAILED"
+            support_case.last_error = f"Queue unavailable: {type(error).__name__}"
+            approval.workflow.status = "FAILED"
+            support_task = db.query(Task).filter(Task.id == support_case.task_id).first()
+            if support_task:
+                support_task.status = "FAILED"
+            db.commit()
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Approval saved but resume queue is unavailable",
+                    "support_case_id": str(support_case.id),
+                },
+            ) from error
     return {
         "id": str(approval.id),
         "status": approval.status,

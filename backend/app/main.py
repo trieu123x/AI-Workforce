@@ -101,6 +101,34 @@ async def health_check():
     )
 
 
+@app.get("/health/ready", tags=["Health"])
+async def readiness_check():
+    """Dependency-aware readiness without exposing queue or database details."""
+    from sqlalchemy import text
+
+    from app.core.database import sync_engine
+    from app.services.work_queue import queue_stats
+
+    dependencies = {"database": False, "redis": False, "worker": False}
+    try:
+        with sync_engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        dependencies["database"] = True
+    except Exception:
+        logger.exception("Readiness database check failed")
+    try:
+        queue = queue_stats()
+        dependencies["redis"] = queue["available"]
+        dependencies["worker"] = queue["worker_online"]
+    except Exception:
+        logger.exception("Readiness queue check failed")
+    ready = all(dependencies.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "dependencies": dependencies},
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
