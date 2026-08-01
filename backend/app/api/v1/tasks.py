@@ -11,7 +11,16 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import get_current_active_user
-from app.models.models import AIAgent, AuditLog, Task, TaskComment, User
+from app.models.models import (
+    AIAgent,
+    AgentWorkflow,
+    AuditLog,
+    OnboardingCase,
+    OnboardingStep,
+    Task,
+    TaskComment,
+    User,
+)
 from app.services.notification_service import notify_users
 
 router = APIRouter(prefix="/tasks", tags=["Task Management"])
@@ -318,6 +327,33 @@ def update_task(
             setattr(task, field_name, value)
     if changes:
         _add_history(db, task, current_user, "task_updated", changes)
+        if "status" in changes:
+            onboarding_step = db.query(OnboardingStep).filter(
+                OnboardingStep.task_id == task.id
+            ).first()
+            if onboarding_step:
+                onboarding_step.status = task.status
+                onboarding_step.completed_at = (
+                    datetime.now(timezone.utc) if task.status == "COMPLETED" else None
+                )
+                db.flush()
+                onboarding_case = db.query(OnboardingCase).filter(
+                    OnboardingCase.id == onboarding_step.onboarding_id
+                ).first()
+                if onboarding_case:
+                    unfinished = db.query(OnboardingStep).filter(
+                        OnboardingStep.onboarding_id == onboarding_case.id,
+                        OnboardingStep.status != "COMPLETED",
+                    ).count()
+                    if unfinished == 0:
+                        onboarding_case.status = "COMPLETED"
+                        onboarding_case.completed_at = datetime.now(timezone.utc)
+                        workflow = db.query(AgentWorkflow).filter(
+                            AgentWorkflow.id == onboarding_case.workflow_id
+                        ).first()
+                        if workflow:
+                            workflow.status = "COMPLETED"
+                            workflow.completed_at = datetime.now(timezone.utc)
         if "status" in changes and task.status in {"COMPLETED", "FAILED"}:
             recipients = [
                 user

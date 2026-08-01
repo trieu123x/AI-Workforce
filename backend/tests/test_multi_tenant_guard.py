@@ -15,6 +15,20 @@ def test_rbac_toggle_agent_forbidden_for_employee(client, employee_token_headers
     assert response.status_code == 403
 
 
+def test_local_frontend_origins_pass_cors_preflight(client):
+    for origin in ("http://localhost:3000", "http://127.0.0.1:3000"):
+        response = client.options(
+            "/api/v1/agent/chat",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "authorization,content-type",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == origin
+
+
 def test_empty_message_validation(client, employee_token_headers):
     """Test 400 Bad Request error on empty chat message."""
     response = client.post("/api/v1/agent/chat", json={"agent_role": "HR", "message": "   "}, headers=employee_token_headers)

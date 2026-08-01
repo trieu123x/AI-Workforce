@@ -110,6 +110,7 @@ class User(Base):
             name="ck_users_role",
         ),
         Index("idx_users_tenant_dept", "tenant_id", "department"),
+        Index("idx_users_manager", "manager_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -124,6 +125,9 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="Employee")
     department: Mapped[str] = mapped_column(String(50), nullable=False, default="ALL")
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    manager_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -139,6 +143,12 @@ class User(Base):
     memories: Mapped[list["UserMemory"]] = relationship("UserMemory", back_populates="user", cascade="all, delete-orphan")
     profile: Mapped["UserProfile | None"] = relationship(
         "UserProfile", back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+    manager: Mapped["User | None"] = relationship(
+        "User", remote_side="User.id", foreign_keys=[manager_id], back_populates="direct_reports"
+    )
+    direct_reports: Mapped[list["User"]] = relationship(
+        "User", foreign_keys=[manager_id], back_populates="manager"
     )
 
 
@@ -173,6 +183,16 @@ class UserProfile(Base):
     job_title: Mapped[str | None] = mapped_column(String(150))
     employee_code: Mapped[str | None] = mapped_column(String(50))
     hire_date: Mapped[date | None] = mapped_column(Date)
+    employment_type: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="FULL_TIME"
+    )
+    employment_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="OFFICIAL"
+    )
+    skills: Mapped[dict] = mapped_column(JSONB, nullable=False, default=list)
+    certifications: Mapped[dict] = mapped_column(JSONB, nullable=False, default=list)
+    experience_summary: Mapped[str | None] = mapped_column(Text)
+    employment_history: Mapped[dict] = mapped_column(JSONB, nullable=False, default=list)
     monthly_salary: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     salary_currency: Mapped[str] = mapped_column(String(3), nullable=False, default="VND")
     created_at: Mapped[datetime] = mapped_column(
@@ -208,6 +228,7 @@ class AIAgent(Base):
     allowed_actions: Mapped[dict] = mapped_column(JSONB, default=list)
     disallowed_actions: Mapped[dict] = mapped_column(JSONB, default=list)
     knowledge_access: Mapped[dict] = mapped_column(JSONB, default=list)
+    configuration_version: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
     avatar_emoji: Mapped[str | None] = mapped_column(String(10), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -505,6 +526,277 @@ class UserMemory(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="memories")
+
+
+# ============================================================
+# 8. HR OPERATIONS - structured employee lifecycle records
+# ============================================================
+class LeaveBalance(Base):
+    __tablename__ = "leave_balances"
+    __table_args__ = (
+        UniqueConstraint("user_id", "year", name="uq_leave_balance_user_year"),
+        Index("idx_leave_balance_tenant_year", "tenant_id", "year"),
+        CheckConstraint(
+            "allocated_days >= 0 AND carried_over_days >= 0 AND used_days >= 0 "
+            "AND reserved_days >= 0",
+            name="ck_leave_balance_non_negative",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    allocated_days: Mapped[Decimal] = mapped_column(
+        Numeric(6, 2), nullable=False, default=Decimal("12.00")
+    )
+    carried_over_days: Mapped[Decimal] = mapped_column(
+        Numeric(6, 2), nullable=False, default=Decimal("0.00")
+    )
+    used_days: Mapped[Decimal] = mapped_column(
+        Numeric(6, 2), nullable=False, default=Decimal("0.00")
+    )
+    reserved_days: Mapped[Decimal] = mapped_column(
+        Numeric(6, 2), nullable=False, default=Decimal("0.00")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship("User")
+
+
+class LeaveRequest(Base):
+    __tablename__ = "leave_requests"
+    __table_args__ = (
+        Index("idx_leave_requests_employee_status", "employee_id", "status"),
+        Index("idx_leave_requests_tenant_dates", "tenant_id", "start_date", "end_date"),
+        CheckConstraint("requested_days > 0", name="ck_leave_request_days_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    manager_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_approvals.id", ondelete="SET NULL"), nullable=True
+    )
+    leave_type: Mapped[str] = mapped_column(String(30), nullable=False, default="ANNUAL")
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    part_of_day: Mapped[str] = mapped_column(String(20), nullable=False, default="FULL_DAY")
+    requested_days: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="WAITING")
+    decision_comment: Mapped[str | None] = mapped_column(Text)
+    decided_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    employee: Mapped["User"] = relationship("User", foreign_keys=[employee_id])
+    manager: Mapped["User | None"] = relationship("User", foreign_keys=[manager_id])
+    workflow: Mapped["AgentWorkflow"] = relationship("AgentWorkflow")
+    approval: Mapped["WorkflowApproval | None"] = relationship("WorkflowApproval")
+
+
+class LeaveLedger(Base):
+    __tablename__ = "leave_ledger"
+    __table_args__ = (
+        Index("idx_leave_ledger_balance_created", "balance_id", "created_at"),
+        UniqueConstraint("leave_request_id", "entry_type", name="uq_leave_ledger_request_type"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    balance_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leave_balances.id", ondelete="CASCADE"), nullable=False
+    )
+    leave_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leave_requests.id", ondelete="SET NULL"), nullable=True
+    )
+    entry_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    amount_days: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
+    balance_after: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class HRCalendarEvent(Base):
+    __tablename__ = "hr_calendar_events"
+    __table_args__ = (
+        Index("idx_hr_calendar_tenant_dates", "tenant_id", "start_at", "end_at"),
+        UniqueConstraint("source_type", "source_id", name="uq_hr_calendar_source"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    all_day: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    external_provider: Mapped[str | None] = mapped_column(String(50))
+    external_event_id: Mapped[str | None] = mapped_column(String(255))
+    sync_status: Mapped[str] = mapped_column(String(30), nullable=False, default="INTERNAL")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    user: Mapped["User"] = relationship("User")
+
+
+class EmploymentContract(Base):
+    __tablename__ = "employment_contracts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "contract_number", name="uq_contract_tenant_number"),
+        Index("idx_contract_tenant_expiry", "tenant_id", "end_date", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    contract_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    contract_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="ACTIVE")
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    probation_end_date: Mapped[date | None] = mapped_column(Date)
+    signed_by_employee: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    signed_by_company: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    document_name: Mapped[str | None] = mapped_column(String(255))
+    document_url: Mapped[str | None] = mapped_column(Text)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+    created_by_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    employee: Mapped["User"] = relationship("User", foreign_keys=[employee_id])
+
+
+class OnboardingCase(Base):
+    __tablename__ = "onboarding_cases"
+    __table_args__ = (
+        Index("idx_onboarding_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    mentor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    probation_end_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="IN_PROGRESS")
+    created_by_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    employee: Mapped["User"] = relationship("User", foreign_keys=[employee_id])
+    steps: Mapped[list["OnboardingStep"]] = relationship(
+        "OnboardingStep", back_populates="onboarding", cascade="all, delete-orphan"
+    )
+
+
+class OnboardingStep(Base):
+    __tablename__ = "onboarding_steps"
+    __table_args__ = (
+        UniqueConstraint("onboarding_id", "step_key", name="uq_onboarding_step_key"),
+        Index("idx_onboarding_step_status", "onboarding_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    onboarding_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("onboarding_cases.id", ondelete="CASCADE"), nullable=False
+    )
+    step_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner_department: Mapped[str] = mapped_column(String(50), nullable=False)
+    assignee_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    onboarding: Mapped["OnboardingCase"] = relationship("OnboardingCase", back_populates="steps")
+    assignee: Mapped["User | None"] = relationship("User", foreign_keys=[assignee_id])
+    task: Mapped["Task | None"] = relationship("Task")
 
 
 # ============================================================

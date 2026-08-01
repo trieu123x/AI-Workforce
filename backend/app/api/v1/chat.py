@@ -36,6 +36,7 @@ class AgentChatResponse(BaseModel):
     citations: list[dict[str, Any]] = Field(default_factory=list)
     tools_executed: list[dict[str, Any]] = Field(default_factory=list)
     approval_card: Optional[dict[str, Any]] = None
+    hr_card: Optional[dict[str, Any]] = None
     jira_card: Optional[dict[str, Any]] = None
     legal_risk_card: Optional[dict[str, Any]] = None
     invoice_card: Optional[dict[str, Any]] = None
@@ -89,6 +90,24 @@ def _serialize_message(message: ChatMessage) -> dict[str, Any]:
         "feedback_comment": message.feedback_comment,
         "created_at": message.created_at.isoformat() if message.created_at else None,
     }
+
+
+def _result_attachments(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Persist interactive response cards so chat history can render them again."""
+    card_keys = (
+        "approval_card",
+        "hr_card",
+        "jira_card",
+        "legal_risk_card",
+        "invoice_card",
+        "quote_card",
+        "dag_plan_card",
+    )
+    return [
+        {"type": key.upper(), "payload": result[key]}
+        for key in card_keys
+        if result.get(key) is not None
+    ]
 
 
 @router.post("/chat", response_model=AgentChatResponse, summary="Chat with an AI Employee")
@@ -146,6 +165,7 @@ def chat_with_agent(
         content=result["reply"],
         citations=result.get("citations", []),
         tools_executed=result.get("tools_executed", []),
+        attachments=_result_attachments(result),
     )
     db.add(assistant_message)
     conversation.updated_at = datetime.now(timezone.utc)
@@ -269,6 +289,7 @@ def regenerate_last_response(
         content=result["reply"],
         citations=result.get("citations", []),
         tools_executed=result.get("tools_executed", []),
+        attachments=_result_attachments(result),
     )
     db.add(assistant_message)
     conversation.updated_at = datetime.now(timezone.utc)

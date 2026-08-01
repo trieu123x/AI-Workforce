@@ -99,7 +99,7 @@ def test_ragas_eval_benchmark_endpoint(client, ceo_token_headers):
 
 
 def test_leave_request_quota_exceeded_edge_case(client, employee_token_headers):
-    """Test Edge Case: Requesting 100 leave days (exceeding remaining balance of 10)."""
+    """A large requested duration still cannot bypass the three required slots."""
     response = client.post(
         "/api/v1/agent/chat",
         json={"agent_role": "HR", "message": "Tôi muốn xin nghỉ phép 100 ngày"},
@@ -107,8 +107,10 @@ def test_leave_request_quota_exceeded_edge_case(client, employee_token_headers):
     )
     assert response.status_code == 200
     data = response.json()
-    assert "Không thể gửi đơn" in data["reply"] or "chỉ còn" in data["reply"]
     assert data["approval_card"] is None
+    assert data["hr_card"]["type"] == "LEAVE_REQUEST_DRAFT"
+    assert data["hr_card"]["missing_fields"] == ["start_date", "end_date", "reason"]
+    assert all(tool["tool_name"] != "request_leave" for tool in data["tools_executed"])
 
 
 def test_invalid_approval_action_edge_case(client, ceo_token_headers):

@@ -137,7 +137,15 @@ def seed():
                     description=f"{adata['name']} cho Test Company",
                     system_prompt=f"You are the {adata['name']} AI Agent.",
                     is_active=True,
-                    tools_access=["query_leave_balance", "request_leave", "hybrid_rag_search"],
+                    tools_access=(
+                        [
+                            "hybrid_rag_search", "get_employee_profile", "query_company_users_sql", "query_leave_balance",
+                            "request_leave", "create_onboarding_workflow", "get_contract_expiry",
+                            "list_pending_hr_approvals", "create_hr_task", "send_hr_notification",
+                        ]
+                        if adata["role_code"] == "HR"
+                        else []
+                    ),
                 )
                 db.add(agent)
                 logger.info(f"  ✅ Agent: {adata['role_code']}")

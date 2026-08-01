@@ -98,13 +98,31 @@ export default function CalendarPage() {
   async function fetchData() {
     try {
       setLoading(true);
-      const [tasksRes, agentsRes, usersRes] = await Promise.allSettled([
+      const [tasksRes, agentsRes, usersRes, hrEventsRes] = await Promise.allSettled([
         api.get("/api/v1/tasks"),
         api.get("/api/v1/agents"),
         api.get("/api/v1/users-mgmt"),
+        api.get("/api/v1/hr/calendar-events"),
       ]);
 
-      if (tasksRes.status === "fulfilled") setTasks(tasksRes.value.data);
+      if (tasksRes.status === "fulfilled") {
+        const taskItems: TaskItem[] = tasksRes.value.data;
+        const hrItems: TaskItem[] = hrEventsRes.status === "fulfilled"
+          ? hrEventsRes.value.data.map((event: { id: string; title: string; start_at: string; user: { id: string; name: string }; sync_status: string }) => ({
+              id: `hr-${event.id}`,
+              title: event.title,
+              description: `Sự kiện nhân sự · Trạng thái đồng bộ: ${event.sync_status}`,
+              creator: event.user,
+              assignee: event.user,
+              ai_agent: null,
+              priority: "MEDIUM",
+              due_date: event.start_at,
+              status: "COMPLETED",
+              created_at: event.start_at,
+            }))
+          : [];
+        setTasks([...taskItems, ...hrItems]);
+      }
       if (agentsRes.status === "fulfilled") setAgents(agentsRes.value.data);
       if (usersRes.status === "fulfilled") setUsersList(usersRes.value.data);
     } catch (err) {

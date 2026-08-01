@@ -13,7 +13,7 @@ from sqlalchemy import text
 from app.core.database import sync_engine, Base, SyncSessionLocal
 from app.core.config import settings
 from app.core.security import get_password_hash
-from app.models.models import Tenant, User, AIAgent, Department, DocumentChunk, UserMemory, AgentWorkflow, WorkflowApproval, AuditLog, LLMCostLog, Task, TaskComment
+from app.models.models import Tenant, User, AIAgent, Department, DocumentChunk, UserMemory, AgentWorkflow, WorkflowApproval, AuditLog, LLMCostLog, Task, TaskComment, LeaveBalance
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("init_db")
@@ -111,6 +111,7 @@ def init_db():
         "ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_role",
         "ALTER TABLE users ADD CONSTRAINT ck_users_role CHECK (role IN ('Owner', 'Admin', 'Manager', 'Employee', 'CEO', 'Guest'))",
         "ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_department",
+        "ALTER TABLE ai_agents ADD COLUMN IF NOT EXISTS configuration_version INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE llm_cost_logs ADD COLUMN IF NOT EXISTS cached_prompt_tokens INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE llm_cost_logs ADD COLUMN IF NOT EXISTS usage_source VARCHAR(30) NOT NULL DEFAULT 'LEGACY_ESTIMATE'",
         "ALTER TABLE llm_cost_logs ADD COLUMN IF NOT EXISTS pricing_version VARCHAR(30) NOT NULL DEFAULT 'legacy'",
@@ -230,6 +231,22 @@ def init_db():
                 db.add(mem)
             else:
                 mem.memory_value = json.dumps({"total_days": 12, "used_days": 2, "remaining_days": 10})
+            balance = db.query(LeaveBalance).filter(
+                LeaveBalance.user_id == employee_user.id,
+                LeaveBalance.year == datetime.now(timezone.utc).year,
+            ).first()
+            if not balance:
+                balance = LeaveBalance(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant.id,
+                    user_id=employee_user.id,
+                    year=datetime.now(timezone.utc).year,
+                )
+                db.add(balance)
+            balance.allocated_days = 12
+            balance.carried_over_days = 0
+            balance.used_days = 2
+            balance.reserved_days = 0
             db.commit()
 
         # 3. Seed AI Agents catalog
@@ -307,7 +324,23 @@ def init_db():
 
         default_agent_tools = {
             "CEO": ["generate_and_execute_ceo_dag"],
-            "HR": ["query_leave_balance", "request_leave", "hybrid_rag_search"],
+            "HR": [
+                "query_leave_balance",
+                "request_leave",
+                "hybrid_rag_search",
+                "get_employee_basic_profile",
+                "get_employee_private_profile",
+                "get_employee_contract_summary",
+                "get_employee_compensation_summary",
+                "get_employee_leave_summary",
+                "get_employee_full_profile",
+                "query_company_users_sql",
+                "create_onboarding_workflow",
+                "get_contract_expiry",
+                "list_pending_hr_approvals",
+                "create_hr_task",
+                "send_hr_notification",
+            ],
             "KNOWLEDGE": ["hybrid_search_documents"],
             "LEGAL": ["audit_contract_risk"],
             "IT": ["search_it_kb", "create_jira_ticket"],
@@ -433,6 +466,12 @@ def init_db():
                 )
                 db.add(user)
         db.commit()
+
+        employee_user = db.query(User).filter(User.email == "employee@company.com").first()
+        it_manager = db.query(User).filter(User.email == "it.lead@company.com").first()
+        if employee_user and it_manager and employee_user.manager_id != it_manager.id:
+            employee_user.manager_id = it_manager.id
+            db.commit()
 
         # 6. Seed Sample Workflows, Approvals, & Audit Logs across past 7 days
         all_users = db.query(User).filter(User.tenant_id == tenant.id).all()

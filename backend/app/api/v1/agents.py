@@ -9,11 +9,36 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import RoleRequired, get_current_active_user
-from app.models.models import AIAgent, AgentWorkflow, AuditLog, LLMCostLog, User
+from app.models.models import AIAgent, AgentWorkflow, AuditLog, DocumentChunk, LLMCostLog, User
 from app.schemas.schemas import AIAgentResponse
-from app.services.auth_service import ensure_tenant_default_agents
+from app.services.auth_service import DEFAULT_AGENT_TOOLS, ensure_tenant_default_agents
 
 router = APIRouter(prefix="/agents", tags=["AI Agents"])
+AGENT_CONFIG_ROLES = {"Owner", "Admin"}
+TOOL_DESCRIPTIONS = {
+    "hybrid_rag_search": "Tìm và trích dẫn chính sách trong kho tri thức.",
+    "get_employee_basic_profile": "Đọc riêng thông tin công việc cơ bản qua Policy Engine.",
+    "get_employee_private_profile": "Đọc thông tin cá nhân được lọc và masking theo quyền.",
+    "get_employee_contract_summary": "Đọc tóm tắt hợp đồng, không trả tài liệu gốc.",
+    "get_employee_compensation_summary": "Đọc dữ liệu lương theo quyền và mục đích nghiệp vụ.",
+    "get_employee_leave_summary": "Đọc dữ liệu phép trong phạm vi được cấp.",
+    "get_employee_full_profile": "Tổng hợp các nhóm hồ sơ được yêu cầu sau khi kiểm tra purpose.",
+    "query_company_users_sql": "Chạy truy vấn SQL cố định, có tham số để lấy danh bạ BASIC theo tenant và phạm vi quyền.",
+    "query_leave_balance": "Tra cứu quỹ phép cá nhân.",
+    "request_leave": "Tạo đơn nghỉ và chuyển phê duyệt.",
+    "create_onboarding_workflow": "Khởi tạo workflow onboarding liên phòng ban.",
+    "get_contract_expiry": "Theo dõi hợp đồng và thời gian thử việc.",
+    "list_pending_hr_approvals": "Liệt kê card chờ duyệt theo phạm vi quản lý.",
+    "create_hr_task": "Tạo task nghiệp vụ HR.",
+    "send_hr_notification": "Gửi thông báo nghiệp vụ HR.",
+    "generate_and_execute_ceo_dag": "Lập và thực thi kế hoạch đa agent.",
+    "hybrid_search_documents": "Tìm kiếm kho tri thức dùng chung.",
+    "audit_contract_risk": "Rà soát rủi ro hợp đồng.",
+    "search_it_kb": "Tra cứu tri thức hỗ trợ IT.",
+    "create_jira_ticket": "Tạo ticket IT.",
+    "reconcile_po_db": "Đối soát hóa đơn và đơn mua hàng.",
+    "generate_quotation_pdf": "Tạo báo giá bán hàng.",
+}
 
 
 class AIAgentUpdateRequest(BaseModel):
@@ -38,13 +63,58 @@ def _get_tenant_agent(db: Session, tenant_id, role_code: str) -> AIAgent:
     return agent
 
 
+def _public_agent_response(agent: AIAgent, current_user: User) -> AIAgentResponse:
+    response = AIAgentResponse.model_validate(agent)
+    if current_user.role in AGENT_CONFIG_ROLES:
+        return response
+    return response.model_copy(update={
+        "system_prompt": "Managed by workspace administrators.",
+        "tools_access": [],
+        "allowed_actions": [],
+        "disallowed_actions": [],
+        "knowledge_access": [],
+    })
+
+
+def _validate_knowledge_access(db: Session, current_user: User, values: list[str]) -> list[str]:
+    selectors = sorted({str(value).strip() for value in values if str(value).strip()})
+    if len(selectors) > 5000:
+        raise HTTPException(status_code=422, detail="Too many knowledge selectors")
+    if "*" in selectors and len(selectors) > 1:
+        raise HTTPException(status_code=422, detail="'*' cannot be combined with other knowledge selectors")
+    if "none" in selectors and len(selectors) > 1:
+        raise HTTPException(status_code=422, detail="'none' cannot be combined with other knowledge selectors")
+    if selectors in ([], ["*"], ["none"]):
+        return selectors or ["none"]
+
+    chunks = db.query(DocumentChunk).filter(
+        DocumentChunk.tenant_id == current_user.tenant_id
+    ).all()
+    valid_collections = {item.collection_name for item in chunks}
+    valid_documents = {item.document_id or item.document_name for item in chunks}
+    valid_chunks = {str(item.id) for item in chunks}
+    for selector in selectors:
+        prefix, separator, value = selector.partition(":")
+        if not separator and selector not in valid_collections:
+            raise HTTPException(status_code=422, detail=f"Unknown knowledge collection: {selector}")
+        if prefix == "collection" and value not in valid_collections:
+            raise HTTPException(status_code=422, detail=f"Unknown knowledge collection: {value}")
+        if prefix == "document" and value not in valid_documents:
+            raise HTTPException(status_code=422, detail=f"Unknown knowledge document: {value}")
+        if prefix == "chunk" and value not in valid_chunks:
+            raise HTTPException(status_code=422, detail=f"Unknown knowledge chunk: {value}")
+        if separator and prefix not in {"collection", "document", "chunk"}:
+            raise HTTPException(status_code=422, detail=f"Unsupported knowledge selector: {selector}")
+    return selectors
+
+
 @router.get("/", response_model=List[AIAgentResponse], summary="List tenant AI Employees")
 def list_agents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> List[AIAgentResponse]:
     agents = ensure_tenant_default_agents(db, current_user.tenant_id)
-    return [AIAgentResponse.model_validate(agent) for agent in agents]
+    return [_public_agent_response(agent, current_user) for agent in agents]
 
 
 @router.get("/{role_code}/stats", summary="Get AI Employee history, cost and success rate")
@@ -102,16 +172,68 @@ def get_agent(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> AIAgentResponse:
-    return AIAgentResponse.model_validate(
-        _get_tenant_agent(db, current_user.tenant_id, role_code)
+    return _public_agent_response(
+        _get_tenant_agent(db, current_user.tenant_id, role_code), current_user
     )
+
+
+@router.get(
+    "/{role_code}/configuration-options",
+    summary="List tools and governed knowledge available to an AI Employee",
+    dependencies=[Depends(RoleRequired("Owner", "Admin"))],
+)
+def get_agent_configuration_options(
+    role_code: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> dict:
+    agent = _get_tenant_agent(db, current_user.tenant_id, role_code)
+    tool_names = sorted((
+        set(DEFAULT_AGENT_TOOLS.get(agent.role_code, []))
+        | set(agent.tools_access or [])
+        | set(agent.allowed_actions or [])
+        | set(agent.disallowed_actions or [])
+    ) - {"get_employee_profile"})
+    chunks = db.query(DocumentChunk).filter(
+        DocumentChunk.tenant_id == current_user.tenant_id
+    ).order_by(DocumentChunk.document_name, DocumentChunk.chunk_index).all()
+    documents: dict[str, dict] = {}
+    for chunk in chunks:
+        document_id = chunk.document_id or chunk.document_name
+        document = documents.setdefault(document_id, {
+            "document_id": document_id,
+            "document_name": chunk.document_name,
+            "document_title": chunk.document_title or chunk.document_name,
+            "collection_name": chunk.collection_name,
+            "department_access": chunk.department_access,
+            "confidentiality": chunk.confidentiality,
+            "status": chunk.status,
+            "chunks": [],
+        })
+        document["chunks"].append({
+            "id": str(chunk.id),
+            "chunk_index": chunk.chunk_index,
+            "section_title": chunk.section_title or f"Chunk {chunk.chunk_index}",
+            "page_start": chunk.page_start or chunk.page,
+            "page_end": chunk.page_end or chunk.page,
+            "status": chunk.status,
+            "confidentiality": chunk.confidentiality,
+        })
+    return {
+        "agent_role": agent.role_code,
+        "tools": [
+            {"name": name, "description": TOOL_DESCRIPTIONS.get(name, name)}
+            for name in tool_names
+        ],
+        "documents": list(documents.values()),
+    }
 
 
 @router.patch(
     "/{role_code}",
     response_model=AIAgentResponse,
     summary="Configure an AI Employee",
-    dependencies=[Depends(RoleRequired("Owner", "Admin", "CEO"))],
+    dependencies=[Depends(RoleRequired("Owner", "Admin"))],
 )
 def update_agent(
     role_code: str,
@@ -121,15 +243,57 @@ def update_agent(
 ) -> AIAgentResponse:
     agent = _get_tenant_agent(db, current_user.tenant_id, role_code)
     data = req.model_dump(exclude_unset=True)
-    if "allowed_actions" in data and "disallowed_actions" in data:
-        overlap = set(data["allowed_actions"]) & set(data["disallowed_actions"])
-        if overlap:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Actions cannot be both allowed and disallowed: {', '.join(sorted(overlap))}",
-            )
+    if "knowledge_access" in data:
+        data["knowledge_access"] = _validate_knowledge_access(
+            db, current_user, data["knowledge_access"]
+        )
+    submitted_tool_names = set().union(*(
+        set(data.get(field_name, []))
+        for field_name in ("tools_access", "allowed_actions", "disallowed_actions")
+        if field_name in data
+    ))
+    if "get_employee_profile" in submitted_tool_names:
+        raise HTTPException(
+            status_code=422,
+            detail="Deprecated broad HR profile tool is not allowed; select narrow HR tools instead",
+        )
+    unknown_tools = submitted_tool_names - set(TOOL_DESCRIPTIONS)
+    if unknown_tools:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown tools: {', '.join(sorted(unknown_tools))}",
+        )
+    prospective_tools = set(data.get("tools_access", agent.tools_access or []))
+    prospective_allowed = set(data.get("allowed_actions", agent.allowed_actions or []))
+    prospective_denied = set(data.get("disallowed_actions", agent.disallowed_actions or []))
+    overlap = prospective_allowed & prospective_denied
+    if overlap:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Actions cannot be both allowed and disallowed: {', '.join(sorted(overlap))}",
+        )
+    if not prospective_allowed.issubset(prospective_tools):
+        raise HTTPException(status_code=422, detail="Allowed actions must also be enabled tools")
     for field_name, value in data.items():
         setattr(agent, field_name, value)
+    agent.configuration_version = 4
+    db.add(AuditLog(
+        tenant_id=current_user.tenant_id,
+        actor_user_id=current_user.id,
+        actor_type="USER",
+        agent_role=agent.role_code,
+        tool_name="configure_ai_employee",
+        action="agent.configuration.updated",
+        resource_type="AI_AGENT",
+        resource_id=str(agent.id),
+        input_parameters={"updated_fields": sorted(data)},
+        output_result={
+            "tools_access": agent.tools_access or [],
+            "knowledge_access": agent.knowledge_access or [],
+        },
+        status="SUCCESS",
+        execution_time_ms=0,
+    ))
     db.commit()
     db.refresh(agent)
     return AIAgentResponse.model_validate(agent)
@@ -138,7 +302,7 @@ def update_agent(
 @router.patch(
     "/{role_code}/toggle",
     summary="Toggle AI Employee active status",
-    dependencies=[Depends(RoleRequired("Owner", "Admin", "CEO"))],
+    dependencies=[Depends(RoleRequired("Owner", "Admin"))],
 )
 def toggle_agent(
     role_code: str,

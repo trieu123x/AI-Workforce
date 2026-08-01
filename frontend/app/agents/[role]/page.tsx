@@ -20,6 +20,11 @@ import {
 } from "lucide-react";
 
 import Sidebar from "@/components/Sidebar";
+import {
+  ChatAttachment,
+  HRChatTools,
+  HRMessageCard,
+} from "@/components/hr/HRChatTools";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/useAuthStore";
 
@@ -49,6 +54,7 @@ interface ChatResponse {
   message_id: string;
   reply: string;
   citations: Citation[];
+  hr_card?: Record<string, unknown> | null;
 }
 
 interface ChatMessage {
@@ -56,6 +62,8 @@ interface ChatMessage {
   sender: "USER" | "ASSISTANT";
   content: string;
   citations: Citation[];
+  attachments?: ChatAttachment[];
+  tools_executed?: Record<string, unknown>[];
   feedback_rating: number | null;
   created_at: string | null;
 }
@@ -79,6 +87,38 @@ interface ConversationDetail {
   messages: ChatMessage[];
 }
 
+interface AgentToolOption {
+  name: string;
+  description: string;
+}
+
+interface KnowledgeChunkOption {
+  id: string;
+  chunk_index: number;
+  section_title: string;
+  page_start: number | null;
+  page_end: number | null;
+  status: string;
+  confidentiality: string;
+}
+
+interface KnowledgeDocumentOption {
+  document_id: string;
+  document_name: string;
+  document_title: string;
+  collection_name: string;
+  department_access: string;
+  confidentiality: string;
+  status: string;
+  chunks: KnowledgeChunkOption[];
+}
+
+interface AgentConfigurationOptions {
+  agent_role: string;
+  tools: AgentToolOption[];
+  documents: KnowledgeDocumentOption[];
+}
+
 function messageFrom(error: unknown) {
   if (!axios.isAxiosError(error)) return "Không thể xử lý yêu cầu.";
   const detail = error.response?.data?.detail;
@@ -100,10 +140,11 @@ export default function AgentPage() {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [prompt, setPrompt] = useState("");
-  const [tools, setTools] = useState("");
-  const [allowed, setAllowed] = useState("");
-  const [denied, setDenied] = useState("");
-  const [collections, setCollections] = useState("");
+  const [tools, setTools] = useState<string[]>([]);
+  const [deniedTools, setDeniedTools] = useState<string[]>([]);
+  const [knowledgeAccess, setKnowledgeAccess] = useState<string[]>([]);
+  const [configurationOptions, setConfigurationOptions] = useState<AgentConfigurationOptions | null>(null);
+  const [configurationLoading, setConfigurationLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -137,10 +178,9 @@ export default function AgentPage() {
         setMessages([]);
       }
       setPrompt(value.system_prompt);
-      setTools(value.tools_access.join(", "));
-      setAllowed(value.allowed_actions.join(", "));
-      setDenied(value.disallowed_actions.join(", "));
-      setCollections(value.knowledge_access.join(", "));
+      setDeniedTools(value.disallowed_actions);
+      setTools(value.tools_access.filter((tool) => !value.disallowed_actions.includes(tool)));
+      setKnowledgeAccess(value.knowledge_access.length ? value.knowledge_access : ["*"]);
     } catch (reason) {
       setError(messageFrom(reason));
     }
@@ -176,9 +216,7 @@ export default function AgentPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, busy]);
 
-  const sendMessage = async (event: FormEvent) => {
-    event.preventDefault();
-    const content = message.trim();
+  const submitMessage = async (content: string) => {
     if (!content || !agent || busy) return;
     const optimisticMessage: ChatMessage = {
       id: `pending-${Date.now()}`,
@@ -211,6 +249,11 @@ export default function AgentPage() {
       setBusy(false);
       composerRef.current?.focus();
     }
+  };
+
+  const sendMessage = (event: FormEvent) => {
+    event.preventDefault();
+    void submitMessage(message.trim());
   };
 
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -295,16 +338,12 @@ export default function AgentPage() {
     setBusy(true);
     setError(null);
     try {
-      const split = (value: string) => value
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
       const { data } = await api.patch<Agent>(`/api/v1/agents/${role}`, {
         system_prompt: prompt,
-        tools_access: split(tools),
-        allowed_actions: split(allowed),
-        disallowed_actions: split(denied),
-        knowledge_access: split(collections),
+        tools_access: tools,
+        allowed_actions: tools,
+        disallowed_actions: deniedTools.filter((tool) => !tools.includes(tool)),
+        knowledge_access: knowledgeAccess.length ? knowledgeAccess : ["none"],
       });
       setAgent(data);
       setShowSettings(false);
@@ -315,8 +354,49 @@ export default function AgentPage() {
     }
   };
 
+  const openSettings = async () => {
+    setShowSettings(true);
+    setConfigurationLoading(true);
+    setError(null);
+    try {
+      const { data } = await api.get<AgentConfigurationOptions>(
+        `/api/v1/agents/${role}/configuration-options`,
+      );
+      setConfigurationOptions(data);
+    } catch (reason) {
+      setError(messageFrom(reason));
+      setShowSettings(false);
+    } finally {
+      setConfigurationLoading(false);
+    }
+  };
+
+  const toggleTool = (toolName: string) => {
+    setDeniedTools((current) => current.filter((item) => item !== toolName));
+    setTools((current) => current.includes(toolName)
+      ? current.filter((item) => item !== toolName)
+      : [...current, toolName].sort());
+  };
+
+  const toggleKnowledge = (selector: string) => {
+    setKnowledgeAccess((current) => {
+      const base = current.filter((item) => item !== "*" && item !== "none");
+      return base.includes(selector)
+        ? base.filter((item) => item !== selector)
+        : [...base, selector].sort();
+    });
+  };
+
+  const selectAllKnowledge = () => setKnowledgeAccess(["*"]);
+  const selectNoKnowledge = () => setKnowledgeAccess(["none"]);
+
   if (!hasHydrated || !isAuthenticated) return null;
-  const canConfigure = ["Owner", "Admin", "CEO"].includes(user?.role || "");
+  const canConfigure = ["Owner", "Admin"].includes(user?.role || "");
+  const canManageHR = ["Owner", "CEO"].includes(user?.role || "") || (
+    user?.department === "HR" && ["Manager", "Admin"].includes(user?.role || "")
+  );
+  const canApproveHR = canManageHR || ["Manager", "Admin"].includes(user?.role || "");
+  const canSearchEmployees = ["Owner", "CEO", "Admin", "Manager"].includes(user?.role || "");
   const selectedConversation = conversations.find((item) => item.id === conversationId);
   const isReadOnly = Boolean(
     selectedConversation && selectedConversation.owner_id !== user?.id,
@@ -411,7 +491,7 @@ export default function AgentPage() {
                   </button>
                 )}
                 {canConfigure && (
-                  <button type="button" onClick={() => setShowSettings(true)}>
+                  <button type="button" onClick={() => void openSettings()}>
                     <Settings size={16} /> Cấu hình
                   </button>
                 )}
@@ -455,6 +535,12 @@ export default function AgentPage() {
                         ))}
                       </div>
                     )}
+                    {item.attachments?.map((attachment, index) => (
+                      <HRMessageCard
+                        key={`${item.id}-attachment-${index}`}
+                        attachment={attachment}
+                      />
+                    ))}
                     {item.sender === "ASSISTANT" && (
                       <div className="ai-chat-message-actions">
                         <button
@@ -517,6 +603,15 @@ export default function AgentPage() {
             </div>
 
             <div className="ai-chat-composer-wrap">
+              {role === "HR" && !isReadOnly && (
+                <HRChatTools
+                  disabled={busy || !agent?.is_active}
+                  canManageHR={canManageHR}
+                  canApprove={canApproveHR}
+                  canSearchEmployees={canSearchEmployees}
+                  onPrompt={submitMessage}
+                />
+              )}
               {error && (
                 <div className="ai-chat-error">
                   {error}
@@ -574,28 +669,68 @@ export default function AgentPage() {
                 System prompt
                 <textarea rows={7} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
               </label>
-              <label>
-                Tools được phép
-                <input value={tools} onChange={(event) => setTools(event.target.value)} />
-              </label>
-              <label>
-                Knowledge collections
-                <input value={collections} onChange={(event) => setCollections(event.target.value)} />
-              </label>
-              <label>
-                Hành động được phép
-                <input value={allowed} onChange={(event) => setAllowed(event.target.value)} />
-              </label>
-              <label>
-                Hành động cấm
-                <input value={denied} onChange={(event) => setDenied(event.target.value)} />
-              </label>
+              <section className="ai-agent-config-section">
+                <div className="ai-agent-config-heading">
+                  <div><strong>Tools được phép</strong><span>AI chỉ có thể gọi những tool được chọn.</span></div>
+                  <small>{tools.length} tool</small>
+                </div>
+                <div className="ai-agent-tool-grid">
+                  {configurationLoading && <span className="ai-agent-config-empty">Đang tải danh sách tool…</span>}
+                  {configurationOptions?.tools.map((tool) => (
+                    <label className="ai-agent-check-card" key={tool.name}>
+                      <input type="checkbox" checked={tools.includes(tool.name)} onChange={() => toggleTool(tool.name)} />
+                      <span><strong>{tool.name}</strong><small>{tool.description}</small></span>
+                    </label>
+                  ))}
+                </div>
+              </section>
+
+              <section className="ai-agent-config-section">
+                <div className="ai-agent-config-heading">
+                  <div><strong>Tài liệu và chunks được phép</strong><span>ACL của AI luôn được giao với quyền tài liệu của người đang chat.</span></div>
+                  <div className="ai-agent-config-presets">
+                    <button type="button" className={knowledgeAccess.includes("*") ? "active" : ""} onClick={selectAllKnowledge}>Tất cả</button>
+                    <button type="button" className={knowledgeAccess.includes("none") ? "active" : ""} onClick={selectNoKnowledge}>Không tài liệu</button>
+                  </div>
+                </div>
+                <div className="ai-agent-document-list">
+                  {configurationOptions?.documents.length === 0 && <span className="ai-agent-config-empty">Kho tri thức chưa có tài liệu.</span>}
+                  {configurationOptions?.documents.map((document) => {
+                    const documentSelector = `document:${document.document_id}`;
+                    const documentSelected = knowledgeAccess.includes("*") || knowledgeAccess.includes(documentSelector);
+                    return (
+                      <article className="ai-agent-document-option" key={document.document_id}>
+                        <label>
+                          <input type="checkbox" checked={documentSelected} disabled={knowledgeAccess.includes("*")} onChange={() => toggleKnowledge(documentSelector)} />
+                          <span><strong>{document.document_title}</strong><small>{document.collection_name} · {document.department_access} · {document.confidentiality} · {document.chunks.length} chunks</small></span>
+                        </label>
+                        <div className="ai-agent-chunk-list">
+                          {document.chunks.map((chunk) => {
+                            const chunkSelector = `chunk:${chunk.id}`;
+                            return (
+                              <label key={chunk.id}>
+                                <input
+                                  type="checkbox"
+                                  checked={documentSelected || knowledgeAccess.includes(chunkSelector)}
+                                  disabled={documentSelected}
+                                  onChange={() => toggleKnowledge(chunkSelector)}
+                                />
+                                <span>{chunk.section_title}<small>Chunk {chunk.chunk_index}{chunk.page_start ? ` · trang ${chunk.page_start}` : ""} · {chunk.confidentiality}</small></span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
             </div>
             <footer>
               <button type="button" className="secondary" onClick={() => setShowSettings(false)}>
                 Hủy
               </button>
-              <button type="button" className="primary" disabled={busy} onClick={() => void saveConfiguration()}>
+              <button type="button" className="primary" disabled={busy || configurationLoading} onClick={() => void saveConfiguration()}>
                 <Save size={16} /> Lưu cấu hình
               </button>
             </footer>

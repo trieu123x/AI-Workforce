@@ -37,7 +37,7 @@ def fetch_audit_logs(
 )
 def fetch_audit_events(
     actor_type: Optional[str] = Query(None, pattern="^(USER|AGENT|SYSTEM)$"),
-    status: Optional[str] = Query(None, pattern="^(SUCCESS|FAILED|PENDING)$"),
+    status: Optional[str] = Query(None, pattern="^(SUCCESS|FAILED|PENDING|DENIED)$"),
     action: Optional[str] = Query(None, max_length=150),
     resource_type: Optional[str] = Query(None, max_length=100),
     date_from: Optional[datetime] = None,

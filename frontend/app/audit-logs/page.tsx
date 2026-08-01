@@ -84,6 +84,7 @@ export default function AuditLogsPage() {
             <option value="">Tất cả kết quả</option>
             <option value="SUCCESS">Thành công</option>
             <option value="FAILED">Thất bại</option>
+            <option value="DENIED">Bị từ chối</option>
             <option value="PENDING">Đang chờ</option>
           </select>
           <input value={action} onChange={(event) => setAction(event.target.value)} placeholder="Tìm hành động…" />
@@ -110,7 +111,7 @@ export default function AuditLogsPage() {
                     <td><strong>{item.action}</strong><br/><span className="ops-muted">{item.execution_time_ms ?? 0} ms</span></td>
                     <td>{item.resource_type || "—"}<br/><span className="ops-muted">{item.resource_id || ""}</span></td>
                     <td>{item.ip_address || "—"}<br/><span className="ops-muted" title={item.user_agent || ""}>{item.user_agent ? item.user_agent.slice(0, 28) + "…" : ""}</span></td>
-                    <td><span className={`ops-badge ${item.status === "SUCCESS" ? "success" : item.status === "FAILED" ? "error" : "warning"}`}>{item.status}</span></td>
+                    <td><span className={`ops-badge ${item.status === "SUCCESS" ? "success" : ["FAILED", "DENIED"].includes(item.status) ? "error" : "warning"}`}>{item.status}</span></td>
                     <td>
                       <button className="ops-icon-button" onClick={() => setExpanded(expanded === item.id ? null : item.id)} aria-label="Xem chi tiết">
                         {expanded === item.id ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}

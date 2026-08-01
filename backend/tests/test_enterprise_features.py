@@ -224,8 +224,12 @@ def test_completed_task_can_be_deleted_but_active_task_cannot(
 def test_agent_tool_policy_is_enforced(
     client, employee_token_headers, transactional_db_session
 ):
+    employee = transactional_db_session.query(User).filter(
+        User.email == "employee@company.com"
+    ).one()
     agent = transactional_db_session.query(AIAgent).filter(
-        AIAgent.role_code == "HR"
+        AIAgent.tenant_id == employee.tenant_id,
+        AIAgent.role_code == "HR",
     ).first()
     original_denied = list(agent.disallowed_actions or [])
     agent.disallowed_actions = ["query_leave_balance"]

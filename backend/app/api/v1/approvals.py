@@ -21,6 +21,7 @@ from app.models.models import (
     WorkflowApproval,
 )
 from app.services.notification_service import create_notification
+from app.services.hr_service import can_approve_hr_request, finalize_leave_approval
 from app.services.work_queue import enqueue_job
 
 router = APIRouter(prefix="/approvals", tags=["Workflow Approvals"])
@@ -33,7 +34,9 @@ class ApprovalActionRequest(BaseModel):
     edited_payload: Optional[dict[str, Any]] = None
 
 
-def _can_approve(current_user: User, approval: WorkflowApproval) -> bool:
+def _can_approve(db: Session, current_user: User, approval: WorkflowApproval) -> bool:
+    if approval.action_type == "LEAVE_REQUEST":
+        return can_approve_hr_request(db, current_user, approval)
     if current_user.role not in APPROVER_ROLES:
         return approval.approver_id == current_user.id
     if approval.approver_id and approval.approver_id != current_user.id:
@@ -66,7 +69,7 @@ def get_pending_approvals(
             "comments": approval.comments,
         }
         for approval in approvals
-        if _can_approve(current_user, approval)
+        if _can_approve(db, current_user, approval)
     ]
 
 
@@ -83,7 +86,7 @@ def process_approval_action(
     ).first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval request not found")
-    if not _can_approve(current_user, approval):
+    if not _can_approve(db, current_user, approval):
         raise HTTPException(status_code=403, detail="You are not an eligible approver")
     if approval.status != "WAITING":
         raise HTTPException(status_code=409, detail=f"Approval is already {approval.status}")
@@ -93,6 +96,11 @@ def process_approval_action(
         raise HTTPException(status_code=410, detail="Approval request has expired")
     if req.action == "EDIT_AND_APPROVE" and req.edited_payload is None:
         raise HTTPException(status_code=422, detail="edited_payload is required")
+    if approval.action_type == "LEAVE_REQUEST" and req.action == "EDIT_AND_APPROVE":
+        raise HTTPException(
+            status_code=422,
+            detail="Structured leave requests must be approved or rejected without editing",
+        )
 
     original_payload = approval.payload
     if req.action == "EDIT_AND_APPROVE":
@@ -128,6 +136,15 @@ def process_approval_action(
             support_task = db.query(Task).filter(Task.id == support_case.task_id).first()
             if support_task and not approved:
                 support_task.status = "CANCELLED"
+
+    if approval.action_type == "LEAVE_REQUEST":
+        finalize_leave_approval(
+            db,
+            approval,
+            current_user,
+            approved=approved,
+            comment=req.comments,
+        )
 
     if approved and approval.action_type in {"XIN_NGHI_PHEP", "XIN NGHỈ PHÉP"}:
         request_payload = approval.payload or {}

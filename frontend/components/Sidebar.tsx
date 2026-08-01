@@ -232,7 +232,6 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
           href="/tasks"
           active={pathname === "/tasks"}
         />
-
         {/* Lịch Công Việc Calendar */}
         <NavItem
           icon={<Calendar size={18} />}

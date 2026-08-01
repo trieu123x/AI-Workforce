@@ -1,7 +1,7 @@
 """User management and personal profile API routes (sync)."""
 
-import json
 import uuid
+from decimal import Decimal
 from uuid import UUID
 from typing import List
 
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import get_current_active_user, RoleRequired
-from app.models.models import User, UserMemory, UserProfile
+from app.models.models import User, UserProfile
 from app.schemas.schemas import (
     EmploymentProfileUpdate,
     SelfProfileUpdate,
@@ -18,13 +18,14 @@ from app.schemas.schemas import (
     UserUpdate,
 )
 from app.services.cloudinary_service import upload_avatar
+from app.services.hr_service import get_or_create_leave_balance, query_leave_balance
 
 router = APIRouter(prefix="/users", tags=["Users"])
 PERSONAL_PROFILE_FIELDS = {
     "phone", "address", "city", "country", "date_of_birth", "gender", "bio",
     "emergency_contact_name", "emergency_contact_phone", "preferences",
 }
-EMPLOYMENT_MANAGEMENT_ROLES = {"Owner", "Admin", "CEO"}
+EMPLOYMENT_MANAGEMENT_ROLES = {"Owner", "CEO"}
 
 
 def _get_or_create_profile(db: Session, user: User) -> UserProfile:
@@ -47,24 +48,12 @@ def _get_or_create_profile(db: Session, user: User) -> UserProfile:
 
 
 def _leave_balance(db: Session, user: User) -> dict:
-    memory = db.query(UserMemory).filter(
-        UserMemory.tenant_id == user.tenant_id,
-        UserMemory.user_id == user.id,
-        UserMemory.memory_key == "leave_balance",
-    ).first()
-    if memory and memory.memory_value:
-        try:
-            value = json.loads(memory.memory_value)
-            total = float(value.get("total_days", 12))
-            used = float(value.get("used_days", 0))
-            return {
-                "total_days": total,
-                "used_days": used,
-                "remaining_days": max(0, float(value.get("remaining_days", total - used))),
-            }
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
-    return {"total_days": 12.0, "used_days": 0.0, "remaining_days": 12.0}
+    value = query_leave_balance(db, user)
+    return {
+        "total_days": value["total_days"],
+        "used_days": value["used_days"],
+        "remaining_days": value["remaining_days"],
+    }
 
 
 def _serialize_full_profile(db: Session, user: User, profile: UserProfile) -> dict:
@@ -90,6 +79,15 @@ def _serialize_full_profile(db: Session, user: User, profile: UserProfile) -> di
             "job_title": profile.job_title,
             "employee_code": profile.employee_code,
             "hire_date": profile.hire_date.isoformat() if profile.hire_date else None,
+            "employment_type": profile.employment_type,
+            "employment_status": profile.employment_status,
+            "manager": (
+                {"id": str(user.manager.id), "name": user.manager.full_name}
+                if user.manager else None
+            ),
+            "skills": profile.skills or [],
+            "certifications": profile.certifications or [],
+            "experience_summary": profile.experience_summary,
             "monthly_salary": float(profile.monthly_salary) if profile.monthly_salary is not None else None,
             "salary_currency": profile.salary_currency,
             "leave": _leave_balance(db, user),
@@ -181,7 +179,10 @@ def update_employment_profile(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    is_hr_manager = current_user.role == "Manager" and current_user.department == "HR"
+    is_hr_manager = (
+        current_user.role in {"Manager", "Admin"}
+        and current_user.department == "HR"
+    )
     if current_user.role not in EMPLOYMENT_MANAGEMENT_ROLES and not is_hr_manager:
         raise HTTPException(status_code=403, detail="Only Owner/Admin/HR can update employment data")
     target_user = db.query(User).filter(
@@ -198,31 +199,16 @@ def update_employment_profile(
 
     if "leave_total_days" in update_data or "leave_used_days" in update_data:
         current_balance = _leave_balance(db, target_user)
-        total = float(update_data.get("leave_total_days", current_balance["total_days"]))
-        used = float(update_data.get("leave_used_days", current_balance["used_days"]))
+        total = Decimal(str(update_data.get("leave_total_days", current_balance["total_days"])))
+        used = Decimal(str(update_data.get("leave_used_days", current_balance["used_days"])))
         if used > total:
             raise HTTPException(status_code=422, detail="Used leave cannot exceed total leave")
-        memory = db.query(UserMemory).filter(
-            UserMemory.tenant_id == target_user.tenant_id,
-            UserMemory.user_id == target_user.id,
-            UserMemory.memory_key == "leave_balance",
-        ).first()
-        if not memory:
-            memory = UserMemory(
-                id=uuid.uuid4(),
-                tenant_id=target_user.tenant_id,
-                user_id=target_user.id,
-                memory_category="hr",
-                memory_key="leave_balance",
-                memory_value="{}",
-                confidence_score=1.0,
-            )
-            db.add(memory)
-        memory.memory_value = json.dumps({
-            "total_days": total,
-            "used_days": used,
-            "remaining_days": total - used,
-        })
+        balance = get_or_create_leave_balance(db, target_user)
+        balance.allocated_days = total
+        balance.carried_over_days = Decimal("0.00")
+        balance.used_days = used
+        if Decimal(balance.reserved_days) > total - used:
+            raise HTTPException(status_code=409, detail="Pending leave exceeds the adjusted balance")
     db.commit()
     return _serialize_full_profile(db, target_user, profile)
 
