@@ -41,6 +41,149 @@ Backend chịu trách nhiệm xác thực, phân quyền, kiểm soát công c�
 - Dữ liệu: PostgreSQL, pgvector, Redis.
 - Hạ tầng: Docker Compose, GitHub Actions, GitHub Container Registry.
 
+## Kiến trúc AI
+
+### Phân tách trách nhiệm
+
+Hệ thống tách AI runtime khỏi lớp nghiệp vụ để mô hình không trực tiếp nắm quyền truy cập dữ liệu:
+
+| Lớp | Trách nhiệm |
+| --- | --- |
+| Backend | Xác thực, tenant isolation, RBAC, lọc ACL tài liệu, truy vấn PostgreSQL, thực thi tool, approval, audit và cost tracking. |
+| AI Service | Chunking, token counting, embedding, reranking, chọn agent và gọi LLM provider. Dịch vụ này stateless và không có database credential. |
+
+Backend giao tiếp với AI Service qua HTTP nội bộ và header `X-AI-Service-Key`. Khi `AI_SERVICE_URL` để trống, Backend dùng implementation in-process để phát triển và chạy test. Khi URL đã được cấu hình, lỗi từ AI Service được trả về rõ ràng; Backend không tự đổi embedding space bằng một model fallback khác.
+
+Các endpoint chính của AI Service:
+
+| Endpoint | Chức năng |
+| --- | --- |
+| `POST /v1/rag/chunk` | Semantic chunking cho nội dung đã parse. |
+| `POST /v1/token-count` | Đếm token bằng tokenizer của embedding model. |
+| `POST /v1/embeddings` | Sinh document/query embedding và trả model, version, dimension. |
+| `POST /v1/rag/rerank` | Cross-encoder reranking, score fusion và metadata latency/fallback. |
+| `POST /v1/agents/route` | Chọn agent theo role được yêu cầu hoặc keyword routing. |
+| `POST /v1/llm/generate` | Gọi OpenAI, Gemini hoặc local provider qua interface thống nhất. |
+| `GET /health/accelerator` | Báo trạng thái CUDA, PyTorch và thiết bị model đang cấu hình. |
+
+### Agent và intent routing
+
+Luồng HR hiện dùng bộ phân loại intent xác định, không dùng một learned classifier:
+
+1. Chuẩn hóa Unicode, chuyển chữ thường, loại dấu và chuẩn hóa khoảng trắng.
+2. Nhận diện kết hợp giữa hành động và thực thể, ví dụ `tìm/liệt kê/bao nhiêu` + `nhân viên/quản lý`.
+3. Ưu tiên intent cụ thể như hồ sơ cá nhân, hợp đồng, phép, xuất file và danh sách quản lý trước intent chính sách tổng quát.
+4. Chỉ các câu có marker thông tin như `chính sách`, `quy định`, `thủ tục`, `cách`, `điều kiện` mới đi vào RAG.
+5. Intent chưa xác định trả yêu cầu làm rõ thay vì mặc định tìm trong kho tài liệu.
+
+Cách định tuyến này giúp câu hỏi dữ liệu có cấu trúc, chẳng hạn “có bao nhiêu nhân viên” hoặc “tìm các nhân viên quản lý”, gọi đúng tool SQL thay vì bị chuyển sang policy RAG. Mỗi tool tiếp tục được kiểm tra với allowlist của agent và quyền người dùng trước khi thực thi.
+
+Agent registry trong AI Service cũng có keyword router để chọn nhóm agent khi caller không truyền role. Đây là fallback routing đơn giản; chưa phải semantic router hoặc LLM router được huấn luyện. Nếu thay bằng classifier, nên giữ lớp deterministic guardrail cho các intent có side effect và version hóa classifier cùng bộ evaluation riêng.
+
+### Trạng thái tích hợp LLM
+
+AI Service đã có provider abstraction cho OpenAI, Gemini và local provider. Tuy nhiên, luồng nghiệp vụ hiện tại chủ yếu được điều phối tại Backend: tool cho dữ liệu có cấu trúc trả payload xác định, còn RAG trả grounded excerpt và citation từ chunk tốt nhất. Endpoint sinh văn bản tổng quát đã sẵn sàng nhưng chưa phải bước bắt buộc trong mọi phản hồi agent.
+
+Thiết kế này cố ý tách retrieval/tool correctness khỏi tính biến thiên của LLM. Khi bổ sung generative synthesis, context và citation nên được giữ dưới dạng dữ liệu có cấu trúc, sau đó kiểm tra citation coverage và faithfulness trước khi trả kết quả.
+
+## RAG pipeline
+
+### Ingestion và indexing
+
+```text
+PDF / DOCX / TXT / MD / CSV / public HTML
+        |
+        v
+Parse -> conservative cleaning -> semantic sections -> token windows
+        |
+        v
+SHA-256 deduplication -> embedding text -> batched embedding
+        |
+        v
+PostgreSQL metadata + pgvector HNSW + PostgreSQL FTS GIN
+```
+
+Pipeline thực hiện các bước sau:
+
+1. Backend lưu file gốc theo đường dẫn cô lập tenant và ghi SHA-256 của source.
+2. Parser giữ page marker của PDF và heading của DOCX/Markdown; URL công khai được tải và chuyển HTML thành text tại Backend. OCR chưa nằm trong ingestion path hiện tại.
+3. Cleaner chỉ loại control character, khoảng trắng thừa, footer trang phổ biến và nối từ bị ngắt dòng. Các cấu trúc nghiệp vụ như Điều, Khoản, Bước, Trách nhiệm và Điều kiện được giữ lại.
+4. Chunker ưu tiên ranh giới semantic: Markdown heading, numbered heading, Điều, Khoản, Bước, Trách nhiệm, Điều kiện và Phụ lục. Section chỉ được chia tiếp khi vượt giới hạn token.
+5. Cấu hình mặc định là target `450`, max `700` và overlap `80` token. Page range, header path, section type và token count được gắn vào từng chunk.
+6. `embedding_text` được tạo từ phòng ban, loại tài liệu, tên tài liệu, section title và nội dung. Tenant, ACL, trạng thái và ngày hiệu lực không được đưa vào vector; chúng chỉ dùng làm database filter.
+7. Chunk trùng trong cùng lần ingest được loại bằng SHA-256. Vector cũ được tái sử dụng khi `content_hash`, `embedding_text`, model và version không đổi.
+8. Embedding được chạy theo batch, retry exponential, kiểm tra input-token limit, số vector và dimension trước khi index.
+9. Sau khi embedding hoàn tất, Backend khóa record của đúng document version và thay batch chunk trong một transaction ngắn. Version cũ được chuyển sang `inactive` khi version mới được kích hoạt.
+
+Trạng thái xử lý tài liệu đi qua `uploaded/parsing -> chunking -> embedding -> indexing -> ready`; lỗi được lưu ở trạng thái `failed` để phục vụ retry và audit.
+
+### Embedding
+
+Backend và AI Service dùng chung contract gồm `model`, `version`, `dimension` và `input_type`:
+
+- Docker Compose mặc định dùng `Qwen/Qwen3-Embedding-0.6B`, vector `1024` chiều, L2 normalization và cosine distance.
+- Query được thêm retrieval instruction trước khi embed; document embedding dùng metadata-aware text.
+- Chỉ chunk có đúng `embedding_model` và `embedding_version` hiện tại mới tham gia dense retrieval. Điều này ngăn trộn vector từ các embedding space khác nhau.
+- Provider hỗ trợ Hugging Face/sentence-transformers, OpenAI embedding và deterministic hash embedding.
+- Deterministic embedding chỉ phục vụ local test và môi trường không tải model; không nên dùng để đánh giá semantic retrieval trong production.
+- HNSW index dùng `vector_cosine_ops`. PostgreSQL vẫn giữ cột legacy `1536` chiều để đọc dữ liệu cũ trong giai đoạn chuyển đổi.
+
+Khi đổi model hoặc dimension, cần tạo embedding version mới và re-index tài liệu. Không nên cập nhật tên model trên cấu hình rồi tiếp tục dùng index cũ.
+
+### Retrieval và governance filtering
+
+Governance filter được áp dụng trước khi candidate content rời Backend:
+
+- `tenant_id` bắt buộc.
+- `status=active` và khoảng `effective_date/expiration_date` hợp lệ tại thời điểm truy vấn.
+- Phạm vi phòng ban và collection/document/chunk được gán cho agent.
+- `allowed_roles` và `confidentiality`; tài liệu `restricted` yêu cầu role phù hợp, trừ các role đặc quyền đã định nghĩa.
+
+Sau bước lọc, retrieval chạy hai nhánh độc lập:
+
+| Nhánh | Cách xếp hạng | Candidate mặc định |
+| --- | --- | --- |
+| Dense | pgvector cosine distance trên embedding đúng model/version | Top 30 |
+| Sparse | PostgreSQL `to_tsvector('simple', content)` + `plainto_tsquery` + `ts_rank_cd` | Top 30 |
+
+Hai danh sách được hợp nhất bằng Reciprocal Rank Fusion:
+
+```text
+RRF(d) = sum(1 / (60 + rank_m(d)))
+```
+
+RRF score, dense similarity và sparse score được chuẩn hóa rồi chuyển sang reranker. Nếu indexed query không khả dụng trong chế độ in-process, Backend có fallback tính cosine và lexical overlap trực tiếp trên candidate đã được cấp quyền; fallback này ưu tiên khả năng phát triển/test, không phù hợp với corpus lớn.
+
+### Reranking và relevance gate
+
+Trong cấu hình model, tối đa 30 candidate đã khử trùng lặp được đưa vào `BAAI/bge-reranker-v2-m3` qua `sentence-transformers` `CrossEncoder`:
+
+- Input của cross-encoder gồm query và document text có metadata `document title`, `section`, `department`, `document type`.
+- Raw logit được đưa qua sigmoid về miền `0..1`.
+- Final score mặc định: `0.90 * model_score + 0.10 * retrieval_prior`.
+- Retrieval prior: `0.65 * dense + 0.20 * sparse + 0.15 * RRF`.
+- Candidate có model score thấp hơn `RERANK_MIN_MODEL_SCORE` bị loại, sau đó trả Top-K.
+- Model được lazy-load; inference được serialize trong mỗi process để kiểm soát VRAM. Khi CUDA OOM, batch size được giảm dần đến `1`.
+- Nếu cross-encoder lỗi và `RERANK_FALLBACK_ENABLED=true`, AI Service chuyển sang lexical reranker và đánh dấu `fallback_used` trong response metadata.
+
+Khi AI Service không được cấu hình, Backend dùng relevance gate nội bộ. Với embedding thật, score kết hợp dense, lexical coverage, RRF và sparse; với deterministic embedding, lexical score được ưu tiên. Hai ngưỡng `RAG_MIN_DENSE_SCORE` và `RAG_MIN_RELEVANCE_SCORE` ngăn hệ thống luôn trả một “kết quả tốt nhất” cho câu hỏi ngoài miền.
+
+### Grounding và citation
+
+Mỗi kết quả retrieval mang theo document ID/title, version, section, page range, chunk ID, model/version và governance metadata. Citation có dạng:
+
+```text
+[Citation: <document>, v<version>, <section>, p. <page>; chunk=<uuid>]
+```
+
+Nếu không có chunk vượt relevance gate, agent trả thông báo không tìm thấy tài liệu phù hợp thay vì suy diễn chính sách. Luồng hiện tại ưu tiên grounded excerpt; chưa thực hiện claim-level citation verification cho câu trả lời do LLM tổng hợp.
+
+### Đánh giá và observability
+
+Repository có các primitive evaluation cho `Recall@K`, reciprocal rank/MRR, `NDCG@K` và lexical faithfulness. Rerank API trả thêm backend, model, số candidate, latency và cờ fallback; accelerator health endpoint cung cấp thông tin CUDA runtime.
+
+Đây mới là lớp đo lường nền tảng. Trước production, nên bổ sung versioned golden set theo tenant/domain, negative và out-of-domain queries, các lát cắt theo ngôn ngữ/phòng ban/quyền truy cập, cùng quality gate cho retrieval, reranking, citation coverage, faithfulness, latency và chi phí.
+
 ## Yêu cầu môi trường
 
 Cách đơn giản nhất để chạy toàn bộ hệ thống là dùng Docker Desktop hoặc Docker Engine có Docker Compose.
@@ -146,9 +289,11 @@ Những nhóm biến quan trọng gồm:
 | --- | --- |
 | Cơ sở dữ liệu | `DATABASE_URL`, `POSTGRES_*` |
 | Xác thực | `SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES` |
-| AI providers | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` |
+| AI providers | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_AI_API_KEY` |
 | AI Service | `AI_SERVICE_URL`, `AI_SERVICE_INTERNAL_TOKEN`, `AI_SERVICE_TIMEOUT_SECONDS` |
-| Embedding | `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION` |
+| Embedding | `EMBEDDING_BACKEND`, `EMBEDDING_MODEL_NAME`, `EMBEDDING_VERSION`, `EMBEDDING_DIMENSION` |
+| RAG | `RAG_CHUNK_*`, `RAG_MIN_DENSE_SCORE`, `RAG_MIN_RELEVANCE_SCORE` |
+| Reranking | `RERANK_BACKEND`, `RERANK_MODEL_NAME`, `RERANK_MODEL_WEIGHT`, `RERANK_MIN_MODEL_SCORE` |
 | Hàng đợi | `REDIS_URL`, `REDIS_QUEUE_NAME` |
 | Email và lưu trữ | `SMTP_*`, `MINIO_*`, `CLOUDINARY_*` |
 
