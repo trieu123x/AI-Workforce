@@ -49,6 +49,7 @@ DEFAULT_AGENT_TOOLS = {
         "list_pending_hr_approvals",
         "create_hr_task",
         "send_hr_notification",
+        "export_hr_directory",
     ],
     "LEGAL": ["audit_contract_risk"],
     "IT": ["search_it_kb", "create_jira_ticket"],

@@ -61,6 +61,7 @@ HR_CORE_TOOLS = {
     "list_pending_hr_approvals",
     "create_hr_task",
     "send_hr_notification",
+    "export_hr_directory",
 }
 
 
@@ -101,7 +102,11 @@ def _repair_hr_agent_capabilities(agent: AIAgent) -> None:
             allowed.add("query_company_users_sql")
         else:
             denied.add("query_company_users_sql")
-        agent.configuration_version = 4
+    if version < 5:
+        if "export_hr_directory" not in denied:
+            tools.add("export_hr_directory")
+            allowed.add("export_hr_directory")
+        agent.configuration_version = 5
     agent.tools_access = sorted(tools)
     agent.allowed_actions = sorted(allowed)
     agent.disallowed_actions = sorted(denied)
@@ -221,7 +226,7 @@ def _normalize_intent_text(message: str) -> str:
 
 
 def _classify_hr_intent(message: str) -> str:
-    """Separate read-only HR questions from state-changing HR actions."""
+    """Classify HR intent from normalized action and entity markers."""
     normalized = _normalize_intent_text(message)
     if any(term in normalized for term in (
         "con bao nhieu ngay phep",
@@ -232,13 +237,108 @@ def _classify_hr_intent(message: str) -> str:
         return "QUERY_LEAVE_BALANCE"
     if any(term in normalized for term in (
         "xuat file",
+        "xuat danh sach",
+        "xuat du lieu",
+        "trich xuat",
         "export file",
+        "export ",
         "tai file",
+        "tai xuong",
         "xuat bao cao",
     )):
         return "ACTION_EXPORT"
 
+    if any(marker in normalized for marker in (
+        "tao onboarding",
+        "khoi tao onboarding",
+        "onboard ",
+    )):
+        return "ACTION_ONBOARDING"
+
+    if any(marker in normalized for marker in (
+        "ho so day du",
+        "toan bo ho so",
+        "full profile",
+    )):
+        return "FULL_PROFILE"
+    if any(marker in normalized for marker in (
+        "luong cua toi",
+        "muc luong cua toi",
+        "thu nhap cua toi",
+    )):
+        return "SELF_COMPENSATION"
+    if any(marker in normalized for marker in (
+        "thong tin ca nhan cua toi",
+        "ho so rieng tu cua toi",
+    )):
+        return "SELF_PRIVATE_PROFILE"
+    if any(marker in normalized for marker in (
+        "ho so cua toi",
+        "thong tin nhan su cua toi",
+    )):
+        return "SELF_PROFILE"
+    if any(marker in normalized for marker in (
+        "hop dong cua toi",
+        "thu viec cua toi",
+    )):
+        return "SELF_CONTRACT"
+    if any(marker in normalized for marker in (
+        "hop dong sap het han",
+        "hop dong gan het han",
+    )):
+        return "CONTRACT_EXPIRY"
+    if any(marker in normalized for marker in (
+        "don cho duyet",
+        "yeu cau cho duyet",
+        "phe duyet dang cho",
+    )):
+        return "PENDING_APPROVALS"
+
+    count_markers = (
+        "bao nhieu",
+        "co may",
+        "so luong",
+        "tong so",
+    )
+    directory_markers = count_markers + (
+        "danh sach",
+        "liet ke",
+        "tat ca",
+        "tim cac",
+        "tim nhung",
+        "tim tat ca",
+        "xem cac",
+    )
+    employee_entity = any(marker in normalized for marker in (
+        "nhan vien",
+        "nhan su",
+        "employee",
+    ))
+    manager_entity = any(marker in normalized for marker in (
+        "quan ly",
+        "manager",
+    ))
     leave_context = "nghi" in normalized and "phep" in normalized
+
+    if employee_entity and leave_context and any(marker in normalized for marker in count_markers):
+        return "EMPLOYEE_LEAVE_STATUS_COUNT"
+    if manager_entity and (
+        any(marker in normalized for marker in directory_markers)
+        or normalized in {"tim quan ly", "xem quan ly", "quan ly"}
+    ):
+        return "MANAGER_DIRECTORY"
+    if employee_entity and any(marker in normalized for marker in directory_markers):
+        return "EMPLOYEE_DIRECTORY"
+    if any(marker in normalized for marker in (
+        "tim nhan vien",
+        "tim ho so",
+        "tra cuu nhan vien",
+        "xem ho so cua",
+        "ho so nhan vien",
+        "ho so cua ",
+    )):
+        return "EMPLOYEE_SEARCH"
+
     informational_markers = (
         "chinh sach",
         "quy dinh",
@@ -258,7 +358,7 @@ def _classify_hr_intent(message: str) -> str:
         "huong dan",
     )
     if leave_context and any(marker in normalized for marker in informational_markers):
-        return "INFORMATION"
+        return "POLICY_QUERY"
 
     leave_action_markers = (
         "toi muon xin nghi",
@@ -275,7 +375,50 @@ def _classify_hr_intent(message: str) -> str:
     )
     if any(marker in normalized for marker in leave_action_markers):
         return "ACTION_LEAVE_REQUEST"
-    return "INFORMATION"
+    if any(marker in normalized for marker in informational_markers):
+        return "POLICY_QUERY"
+    return "UNKNOWN"
+
+
+def _parse_hr_export_request(message: str) -> tuple[str | None, str | None]:
+    normalized = _normalize_intent_text(message)
+    export_format: str | None = None
+    if "pdf" in normalized:
+        export_format = "pdf"
+    elif any(marker in normalized for marker in ("excel", "xlsx")):
+        export_format = "xlsx"
+    elif "json" in normalized:
+        export_format = "json"
+
+    directory_type: str | None = None
+    if any(marker in normalized for marker in ("quan ly", "manager")):
+        directory_type = "managers"
+    elif any(marker in normalized for marker in ("nhan vien", "nhan su", "employee")):
+        directory_type = "employees"
+    return export_format, directory_type
+
+
+def _extract_employee_search_term(message: str) -> str:
+    email_match = re.search(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", message)
+    if email_match:
+        return email_match.group(0)
+
+    normalized = _normalize_intent_text(message)
+    original_words = message.strip().split()
+    prefixes = (
+        "tra cuu nhan vien",
+        "xem ho so cua",
+        "ho so nhan vien",
+        "tim nhan vien",
+        "tim ho so",
+        "ho so cua",
+    )
+    for prefix in prefixes:
+        if normalized == prefix:
+            return ""
+        if normalized.startswith(f"{prefix} "):
+            return " ".join(original_words[len(prefix.split()):]).strip(" .?!")
+    return ""
 
 
 _LEAVE_DATE_PATTERN = re.compile(
@@ -499,7 +642,6 @@ def execute_agent_chat(
     # 1. HR Agent Processing
     # -----------------------------------------------------------------------
     if role_code_upper == "HR":
-        msg_lower = message.lower()
         hr_intent = _classify_hr_intent(message)
         leave_draft = _load_leave_draft(db, user, thread_id)
         normalized_message = _normalize_intent_text(message)
@@ -524,7 +666,7 @@ def execute_agent_chat(
         if leave_draft and _is_leave_draft_continuation(message, leave_draft):
             hr_intent = "ACTION_LEAVE_REQUEST"
 
-        if any(keyword in msg_lower for keyword in ["tạo onboarding", "khởi tạo onboarding", "onboard "]):
+        if hr_intent == "ACTION_ONBOARDING":
             _require_tool(agent, "create_onboarding_workflow")
             if not can_manage_hr(user):
                 raise HTTPException(status_code=403, detail="Only HR can create onboarding workflows")
@@ -569,8 +711,7 @@ def execute_agent_chat(
             }
             return response_data
 
-        full_profile_markers = ["hồ sơ đầy đủ", "toàn bộ hồ sơ", "full profile"]
-        if any(marker in msg_lower for marker in full_profile_markers):
+        if hr_intent == "FULL_PROFILE":
             _require_tool(agent, "get_employee_full_profile")
             email_match = re.search(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", message)
             if not email_match:
@@ -628,7 +769,7 @@ def execute_agent_chat(
             response_data["hr_card"] = profile_payload
             return response_data
 
-        if any(marker in msg_lower for marker in ["lương của tôi", "mức lương của tôi", "thu nhập của tôi"]):
+        if hr_intent == "SELF_COMPENSATION":
             _require_tool(agent, "get_employee_compensation_summary")
             profile_payload = _employee_profile_payload(
                 db,
@@ -651,7 +792,7 @@ def execute_agent_chat(
             response_data["hr_card"] = profile_payload
             return response_data
 
-        if any(marker in msg_lower for marker in ["thông tin cá nhân của tôi", "hồ sơ riêng tư của tôi"]):
+        if hr_intent == "SELF_PRIVATE_PROFILE":
             _require_tool(agent, "get_employee_private_profile")
             profile_payload = _employee_profile_payload(
                 db,
@@ -674,7 +815,7 @@ def execute_agent_chat(
             response_data["hr_card"] = profile_payload
             return response_data
 
-        if any(keyword in msg_lower for keyword in ["hồ sơ của tôi", "thông tin nhân sự của tôi"]):
+        if hr_intent == "SELF_PROFILE":
             _require_tool(agent, "get_employee_full_profile")
             profile_payload = _employee_profile_payload(
                 db,
@@ -697,16 +838,55 @@ def execute_agent_chat(
             response_data["hr_card"] = profile_payload
             return response_data
 
-        manager_directory_keywords = [
-            "danh sách quản lý",
-            "danh sách quản lí",
-            "liệt kê quản lý",
-            "liệt kê quản lí",
-            "các quản lý",
-            "các quản lí",
-            "danh sach quan ly",
-        ]
-        if any(keyword in msg_lower for keyword in manager_directory_keywords):
+        if hr_intent == "ACTION_EXPORT":
+            export_format, directory_type = _parse_hr_export_request(message)
+            missing = []
+            if not directory_type:
+                missing.append("loại dữ liệu (**danh sách nhân viên** hoặc **danh sách quản lý**)")
+            if not export_format:
+                missing.append("định dạng (**Excel**, **PDF** hoặc **JSON**)")
+            if missing:
+                response_data["reply"] = (
+                    "Để tạo file an toàn, vui lòng bổ sung "
+                    + " và ".join(missing)
+                    + ". Ví dụ: **Xuất danh sách nhân viên Excel**."
+                )
+                return response_data
+
+            _require_tool(agent, "export_hr_directory")
+            directory_label = (
+                "danh sách quản lý" if directory_type == "managers" else "danh sách nhân viên"
+            )
+            format_label = {"xlsx": "Excel", "pdf": "PDF", "json": "JSON"}[export_format]
+            download_url = (
+                f"/api/v1/hr/employees/export?format={export_format}"
+                f"&directory={directory_type}"
+            )
+            response_data["tools_executed"].append({
+                "tool_name": "export_hr_directory",
+                "input": {
+                    "format": export_format,
+                    "directory": directory_type,
+                    "purpose": "DIRECTORY_EXPORT",
+                },
+                "result": "download_ready",
+            })
+            response_data["reply"] = (
+                f"File **{format_label}** cho **{directory_label}** đã sẵn sàng. "
+                "Dữ liệu sẽ được lấy lại theo quyền hiện tại của bạn khi tải xuống."
+            )
+            response_data["hr_card"] = {
+                "type": "FILE_EXPORT",
+                "format": export_format,
+                "format_label": format_label,
+                "directory_type": directory_type,
+                "directory_label": directory_label,
+                "download_url": download_url,
+                "scope": hr_scope_label(user),
+            }
+            return response_data
+
+        if hr_intent == "MANAGER_DIRECTORY":
             _require_tool(agent, "query_company_users_sql")
             directory = query_company_users_sql(
                 db,
@@ -730,19 +910,21 @@ def execute_agent_chat(
                 },
                 "result_count": len(items),
             })
+            total_count = directory.get("total_count", len(items))
             response_data["reply"] = (
-                f"Tôi tìm thấy **{len(items)} quản lý** trong phạm vi **{scope}** "
+                f"Tôi tìm thấy **{total_count} quản lý** trong phạm vi **{scope}** "
                 "bạn được phép xem."
             )
             response_data["hr_card"] = {
                 "type": "EMPLOYEE_SEARCH",
                 "directory_type": "MANAGERS",
                 "scope": scope,
+                "total_count": total_count,
                 "items": items,
             }
             return response_data
 
-        if any(keyword in msg_lower for keyword in ["danh sách nhân viên", "liệt kê nhân viên", "tất cả nhân viên"]):
+        if hr_intent == "EMPLOYEE_DIRECTORY":
             _require_tool(agent, "query_company_users_sql")
             directory = query_company_users_sql(
                 db,
@@ -765,36 +947,21 @@ def execute_agent_chat(
                 },
                 "result_count": len(items),
             })
+            total_count = directory.get("total_count", len(items))
             response_data["reply"] = (
-                f"Tôi tìm thấy **{len(items)} nhân viên** trong phạm vi **{scope}** bạn được phép xem."
+                f"Tôi tìm thấy **{total_count} nhân viên** trong phạm vi **{scope}** bạn được phép xem."
             )
             response_data["hr_card"] = {
                 "type": "EMPLOYEE_SEARCH",
                 "scope": scope,
+                "total_count": total_count,
                 "items": items,
             }
             return response_data
 
-        employee_search_keywords = [
-            "tìm nhân viên",
-            "tìm hồ sơ",
-            "tra cứu nhân viên",
-            "xem hồ sơ của",
-            "hồ sơ nhân viên",
-            "hồ sơ của ",
-        ]
-        if any(keyword in msg_lower for keyword in employee_search_keywords):
+        if hr_intent == "EMPLOYEE_SEARCH":
             _require_tool(agent, "query_company_users_sql")
-            email_match = re.search(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", message)
-            search_term = email_match.group(0) if email_match else ""
-            if not search_term:
-                for pattern in [
-                    r"(?:tìm nhân viên|tìm hồ sơ|tra cứu nhân viên|xem hồ sơ của|hồ sơ nhân viên|hồ sơ của)\s+(.+)",
-                ]:
-                    match = re.search(pattern, message, re.IGNORECASE)
-                    if match:
-                        search_term = match.group(1).strip(" .?!")
-                        break
+            search_term = _extract_employee_search_term(message)
             if not search_term:
                 response_data["reply"] = "Vui lòng cung cấp tên hoặc email nhân viên cần tra cứu."
                 return response_data
@@ -842,7 +1009,7 @@ def execute_agent_chat(
             }
             return response_data
 
-        if any(keyword in msg_lower for keyword in ["hợp đồng của tôi", "thử việc của tôi"]):
+        if hr_intent == "SELF_CONTRACT":
             _require_tool(agent, "get_employee_contract_summary")
             profile_payload = _employee_profile_payload(
                 db,
@@ -861,7 +1028,7 @@ def execute_agent_chat(
             response_data["hr_card"] = profile_payload
             return response_data
 
-        if "hợp đồng sắp hết hạn" in msg_lower:
+        if hr_intent == "CONTRACT_EXPIRY":
             _require_tool(agent, "get_contract_expiry")
             contract_result = list_contract_status_summaries(
                 db,
@@ -896,7 +1063,7 @@ def execute_agent_chat(
             }
             return response_data
 
-        if any(keyword in msg_lower for keyword in ["đơn chờ duyệt", "yêu cầu chờ duyệt", "phê duyệt đang chờ"]):
+        if hr_intent == "PENDING_APPROVALS":
             _require_tool(agent, "list_pending_hr_approvals")
             approvals = db.query(WorkflowApproval).join(AgentWorkflow).filter(
                 AgentWorkflow.tenant_id == user.tenant_id,
@@ -1016,16 +1183,23 @@ def execute_agent_chat(
             response_data["hr_card"] = {"type": "LEAVE_BALANCE", "balance": bal}
             return response_data
 
-        if hr_intent == "ACTION_EXPORT":
+        if hr_intent == "EMPLOYEE_LEAVE_STATUS_COUNT":
             response_data["reply"] = (
-                "Đây là một yêu cầu hành động xuất file. Bạn vui lòng cho biết muốn xuất "
-                "**lịch sử hội thoại**, **danh sách nhân sự** hay **báo cáo HR**, và định dạng "
-                "mong muốn (**PDF**, **Excel** hoặc **JSON**). Tôi chưa thực hiện xuất file "
-                "khi chưa đủ phạm vi và định dạng."
+                "Tôi nhận ra đây là yêu cầu thống kê **nhân viên đang nghỉ phép**, "
+                "nhưng HR Agent hiện chưa có tool lịch nghỉ theo ngày để trả lời chính xác. "
+                "Tôi chưa chuyển câu hỏi này sang kho chính sách."
             )
             return response_data
 
-        else:
+        if hr_intent == "UNKNOWN":
+            response_data["reply"] = (
+                "Tôi chưa xác định rõ nghiệp vụ HR cần thực hiện. Bạn có thể yêu cầu, ví dụ: "
+                "**tìm nhân viên An**, **liệt kê các quản lý**, **xem ngày phép của tôi**, "
+                "**hỏi chính sách nghỉ phép** hoặc **xuất danh sách nhân viên Excel**."
+            )
+            return response_data
+
+        if hr_intent == "POLICY_QUERY":
             _require_tool(agent, "hybrid_rag_search")
             search_results = hybrid_search_documents(
                 db,
@@ -1086,6 +1260,11 @@ def execute_agent_chat(
                     "Tôi sẽ không tự suy diễn quy định; vui lòng liên hệ HR để được xác nhận."
                 )
             return response_data
+
+        response_data["reply"] = (
+            "Tôi chưa thể xử lý yêu cầu HR này. Vui lòng mô tả rõ hành động và đối tượng cần tra cứu."
+        )
+        return response_data
 
     # -----------------------------------------------------------------------
     # 2. KNOWLEDGE Agent Processing (Hybrid RAG)

@@ -7,7 +7,7 @@ from datetime import date
 from typing import Any, Iterable
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import aliased
 
@@ -88,6 +88,9 @@ def query_company_users_sql(
         statement = statement.where(User.department.in_(normalized_departments))
     if normalized_roles:
         statement = statement.where(User.role.in_(normalized_roles))
+    total_count = int(db.execute(
+        select(func.count()).select_from(statement.order_by(None).subquery())
+    ).scalar_one())
     rows = db.execute(statement.order_by(User.full_name).limit(safe_limit)).all()
     items = [
         {
@@ -129,6 +132,7 @@ def query_company_users_sql(
             "result": "ALLOWED",
             "scope": scope,
             "result_count": len(items),
+            "total_count": total_count,
             "result_ids": [item["id"] for item in items],
             "allowed_sections": ["BASIC"],
             "query_type": "FIXED_PARAMETERIZED_SQL",
@@ -141,6 +145,124 @@ def query_company_users_sql(
         "request_id": request_id,
         "purpose": "DIRECTORY_LOOKUP",
         "scope": scope,
+        "total_count": total_count,
+        "items": items,
+    }
+
+
+def export_company_users_dataset(
+    db: Session,
+    *,
+    actor: User,
+    roles: Iterable[str] | None = None,
+    active_only: bool = True,
+    max_rows: int = 10_000,
+) -> dict[str, Any]:
+    """Return an auditable BASIC-only HR directory dataset for file export.
+
+    The caller cannot supply tenant IDs, employee IDs, selected columns, or raw
+    SQL. Reporting scope is always resolved from the authenticated actor.
+    """
+    request_id = f"REQ-{uuid.uuid4()}"
+    normalized_roles = tuple(dict.fromkeys(
+        str(value).strip()[:50] for value in (roles or []) if str(value).strip()
+    ))
+    safe_max_rows = max(1, min(int(max_rows), 10_000))
+    scoped_ids = authorized_employee_ids(db, actor)
+    manager = aliased(User)
+    statement = (
+        select(
+            User.id,
+            User.full_name,
+            User.email,
+            User.role,
+            User.department,
+            User.is_active,
+            UserProfile.job_title,
+            UserProfile.employee_code,
+            UserProfile.employment_status,
+            manager.full_name.label("manager_name"),
+        )
+        .outerjoin(
+            UserProfile,
+            (UserProfile.user_id == User.id) & (UserProfile.tenant_id == actor.tenant_id),
+        )
+        .outerjoin(
+            manager,
+            (manager.id == User.manager_id) & (manager.tenant_id == actor.tenant_id),
+        )
+        .where(
+            User.tenant_id == actor.tenant_id,
+            User.id.in_(scoped_ids),
+        )
+    )
+    if active_only:
+        statement = statement.where(User.is_active.is_(True))
+    if normalized_roles:
+        statement = statement.where(User.role.in_(normalized_roles))
+
+    total_count = int(db.execute(
+        select(func.count()).select_from(statement.order_by(None).subquery())
+    ).scalar_one())
+    if total_count > safe_max_rows:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Export contains {total_count} records, exceeding the safe limit "
+                f"of {safe_max_rows}. Narrow the export scope and try again."
+            ),
+        )
+
+    rows = db.execute(statement.order_by(User.full_name)).all()
+    items = [
+        {
+            "id": str(row.id),
+            "name": row.full_name,
+            "email": row.email,
+            "role": row.role,
+            "department": row.department,
+            "job_title": row.job_title,
+            "employee_code": row.employee_code,
+            "employment_status": (
+                row.employment_status or ("ACTIVE" if row.is_active else "INACTIVE")
+            ),
+            "manager_name": row.manager_name,
+        }
+        for row in rows
+    ]
+    scope = hr_scope_label(actor)
+    add_audit_event(
+        db,
+        tenant_id=actor.tenant_id,
+        actor_user=actor,
+        actor_type="USER",
+        agent_role="HR",
+        action="employee.directory.file.export",
+        tool_name="export_hr_directory",
+        resource_type="EMPLOYEE_DIRECTORY",
+        input_parameters={
+            "request_id": request_id,
+            "roles": list(normalized_roles),
+            "active_only": active_only,
+            "max_rows": safe_max_rows,
+            "purpose": "DIRECTORY_EXPORT",
+        },
+        output_result={
+            "request_id": request_id,
+            "result": "ALLOWED",
+            "scope": scope,
+            "result_count": len(items),
+            "allowed_sections": ["BASIC"],
+            "source": "AI_HR",
+        },
+        status="SUCCESS",
+    )
+    db.commit()
+    return {
+        "request_id": request_id,
+        "purpose": "DIRECTORY_EXPORT",
+        "scope": scope,
+        "total_count": total_count,
         "items": items,
     }
 

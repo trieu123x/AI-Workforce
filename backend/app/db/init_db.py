@@ -340,6 +340,7 @@ def init_db():
                 "list_pending_hr_approvals",
                 "create_hr_task",
                 "send_hr_notification",
+                "export_hr_directory",
             ],
             "KNOWLEDGE": ["hybrid_search_documents"],
             "LEGAL": ["audit_contract_risk"],

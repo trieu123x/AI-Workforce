@@ -6,7 +6,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -36,8 +36,33 @@ from app.services.hr_service import (
     serialize_onboarding,
 )
 from app.services.notification_service import create_notification
+from app.services.hr_export_service import create_hr_directory_export
 
 router = APIRouter(prefix="/hr", tags=["AI HR Operations"])
+
+
+@router.get("/employees/export", summary="Export the authorized HR directory")
+def export_employee_directory(
+    format: Literal["xlsx", "pdf", "json"] = Query("xlsx"),
+    directory: Literal["employees", "managers"] = Query("employees"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    export = create_hr_directory_export(
+        db,
+        actor=current_user,
+        export_format=format,
+        directory_type=directory,
+    )
+    return Response(
+        content=export["content"],
+        media_type=export["media_type"],
+        headers={
+            "Content-Disposition": f'attachment; filename="{export["filename"]}"',
+            "Content-Length": str(len(export["content"])),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 class LeaveRequestCreate(BaseModel):

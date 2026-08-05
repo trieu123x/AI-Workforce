@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronUp,
   ClipboardCheck,
+  Download,
   FileText,
   Loader2,
   MessageCircleQuestion,
@@ -225,6 +226,61 @@ function ApprovalList({ items }: { items: AnyRecord[] }) {
   );
 }
 
+function HRExportCard({ payload }: { payload: AnyRecord }) {
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const download = async () => {
+    const downloadUrl = String(payload.download_url || "");
+    if (!downloadUrl.startsWith("/api/v1/hr/employees/export?")) {
+      setError("Liên kết tải file không hợp lệ.");
+      return;
+    }
+    setDownloading(true);
+    setError(null);
+    try {
+      const response = await api.get<Blob>(downloadUrl, { responseType: "blob" });
+      const disposition = String(response.headers["content-disposition"] || "");
+      const matchedFilename = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+      const extension = String(payload.format || "xlsx");
+      const filename = matchedFilename || `hr-directory.${extension}`;
+      const objectUrl = URL.createObjectURL(response.data);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể tải file.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (
+    <section className="hr-message-card hr-export-card">
+      <header>
+        <FileText size={17} />
+        <strong>File {display(payload.format_label)}</strong>
+        <span>{display(payload.scope)}</span>
+      </header>
+      <div className="hr-export-card-body">
+        <div>
+          <strong>{display(payload.directory_label, "Danh sách nhân sự")}</strong>
+          <span>Dữ liệu BASIC sẽ được kiểm tra lại theo quyền của bạn khi tải.</span>
+        </div>
+        <button type="button" disabled={downloading} onClick={() => void download()}>
+          {downloading ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
+          {downloading ? "Đang tạo file…" : "Tải file"}
+        </button>
+      </div>
+      {error && <p className="hr-card-error">{error}</p>}
+    </section>
+  );
+}
+
 export function HRMessageCard({ attachment }: { attachment: ChatAttachment }) {
   const payload = (attachment.payload || {}) as AnyRecord;
   if (attachment.type === "APPROVAL_CARD") {
@@ -238,6 +294,9 @@ export function HRMessageCard({ attachment }: { attachment: ChatAttachment }) {
   if (attachment.type !== "HR_CARD") return null;
 
   const type = String(payload.type || "");
+  if (type === "FILE_EXPORT") {
+    return <HRExportCard payload={payload} />;
+  }
   if (type === "EMPLOYEE_PROFILE") {
     const employee = (payload.employee || {}) as AnyRecord;
     const balance = (payload.leave_balance || {}) as AnyRecord;
@@ -280,12 +339,13 @@ export function HRMessageCard({ attachment }: { attachment: ChatAttachment }) {
   if (type === "EMPLOYEE_SEARCH") {
     const items = (payload.items || []) as AnyRecord[];
     const isManagerDirectory = payload.directory_type === "MANAGERS";
+    const totalCount = Number(payload.total_count ?? items.length);
     return (
       <section className="hr-message-card">
         <header>
           <Search size={17} />
           <strong>{isManagerDirectory ? "Danh sách quản lý" : "Kết quả tìm nhân viên"}</strong>
-          <span>{items.length} {isManagerDirectory ? "quản lý" : "hồ sơ"} · {display(payload.scope)}</span>
+          <span>{totalCount} {isManagerDirectory ? "quản lý" : "hồ sơ"} · {display(payload.scope)}</span>
         </header>
         <div className="hr-card-list">
           {items.length === 0 && <p className="hr-card-empty">Không có hồ sơ trong phạm vi được phép.</p>}

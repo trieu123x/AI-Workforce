@@ -142,6 +142,7 @@ def seed():
                             "hybrid_rag_search", "get_employee_profile", "query_company_users_sql", "query_leave_balance",
                             "request_leave", "create_onboarding_workflow", "get_contract_expiry",
                             "list_pending_hr_approvals", "create_hr_task", "send_hr_notification",
+                            "export_hr_directory",
                         ]
                         if adata["role_code"] == "HR"
                         else []

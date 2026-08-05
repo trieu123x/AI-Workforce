@@ -228,7 +228,7 @@ class AIAgent(Base):
     allowed_actions: Mapped[dict] = mapped_column(JSONB, default=list)
     disallowed_actions: Mapped[dict] = mapped_column(JSONB, default=list)
     knowledge_access: Mapped[dict] = mapped_column(JSONB, default=list)
-    configuration_version: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    configuration_version: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     avatar_emoji: Mapped[str | None] = mapped_column(String(10), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

@@ -31,6 +31,7 @@ TOOL_DESCRIPTIONS = {
     "list_pending_hr_approvals": "Liệt kê card chờ duyệt theo phạm vi quản lý.",
     "create_hr_task": "Tạo task nghiệp vụ HR.",
     "send_hr_notification": "Gửi thông báo nghiệp vụ HR.",
+    "export_hr_directory": "Xuất danh bạ HR theo quyền ra Excel, PDF hoặc JSON.",
     "generate_and_execute_ceo_dag": "Lập và thực thi kế hoạch đa agent.",
     "hybrid_search_documents": "Tìm kiếm kho tri thức dùng chung.",
     "audit_contract_risk": "Rà soát rủi ro hợp đồng.",
@@ -276,7 +277,7 @@ def update_agent(
         raise HTTPException(status_code=422, detail="Allowed actions must also be enabled tools")
     for field_name, value in data.items():
         setattr(agent, field_name, value)
-    agent.configuration_version = 4
+    agent.configuration_version = 5
     db.add(AuditLog(
         tenant_id=current_user.tenant_id,
         actor_user_id=current_user.id,

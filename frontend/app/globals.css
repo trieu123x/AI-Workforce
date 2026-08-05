@@ -1252,6 +1252,30 @@ body {
 .hr-onboarding-summary { display: flex; flex-direction: column; gap: 5px; padding: 13px; }
 .hr-onboarding-summary strong { color: #1e293b; font-size: .78rem; }
 .hr-onboarding-summary span { color: #64748b; font-size: .66rem; }
+.hr-export-card-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px;
+}
+.hr-export-card-body > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.hr-export-card-body strong { color: #1e293b; font-size: .75rem; text-transform: capitalize; }
+.hr-export-card-body span { color: #64748b; font-size: .64rem; line-height: 1.45; }
+.hr-export-card-body button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: #3c50e0;
+  color: #fff;
+  font: 700 .66rem/1 Inter, sans-serif;
+  cursor: pointer;
+}
+.hr-export-card-body button:disabled { opacity: .6; cursor: wait; }
 .hr-card-error { margin: 0; padding: 8px 12px; background: #fef2f2; color: #b91c1c; font-size: .64rem; }
 .spin { animation: hr-spin .8s linear infinite; }
 @keyframes hr-spin { to { transform: rotate(360deg); } }
