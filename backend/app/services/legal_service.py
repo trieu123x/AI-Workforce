@@ -1,73 +1,291 @@
-"""
-Legal Counsel AI Service for contract OCR audit, risk clause detection, and redline document generation.
+"""Deterministic legal document analysis used by the Legal Agent tools.
+
+The service intentionally returns explainable findings. An LLM may add context, but
+severity, evidence and the risk score remain traceable to the source text.
 """
 
-import logging
+from __future__ import annotations
+
+import difflib
+import json
 import re
 import uuid
-from typing import Dict, Any, List
-
-logger = logging.getLogger(__name__)
+from typing import Any
 
 
-def audit_contract_text(contract_text: str, document_name: str = "Contract.pdf") -> Dict[str, Any]:
-    """
-    Audits contract text for high-risk legal clauses:
-    - Unilateral termination (đơn phương chấm dứt)
-    - Penalty rate > 20% (phạt vi phạm > 20%)
-    - Unlimited indemnification / liability (bồi thường không giới hạn)
-    """
-    risks = []
-    text_lower = contract_text.lower()
+SEVERITY_WEIGHT = {"HIGH": 25, "MEDIUM": 12, "LOW": 5}
 
-    # Risk 1: Penalty > 20%
-    penalty_matches = re.findall(r'phạt\s+(\d+)%', text_lower)
-    for p in penalty_matches:
-        rate = int(p)
-        if rate > 20:
-            risks.append({
-                "clause": f"Mức phạt vi phạm hợp đồng {rate}%",
-                "severity": "HIGH",
-                "recommendation": f"Đề xuất giảm mức phạt vi phạm xuống tối đa 8% theo Điều 301 Luật Thương mại.",
-            })
 
-    if "phạt" in text_lower and not penalty_matches and ("30%" in text_lower or "25%" in text_lower or "50%" in text_lower):
-        risks.append({
-            "clause": "Mức phạt vi phạm hợp đồng vượt quá hạn mức pháp luật",
-            "severity": "HIGH",
-            "recommendation": "Đề xuất điều chỉnh mức phạt vi phạm về tối đa 8% giá trị phần nghĩa vụ bị vi phạm.",
-        })
+def _compact(value: str, limit: int = 220) -> str:
+    value = re.sub(r"\s+", " ", value).strip()
+    return value if len(value) <= limit else f"{value[: limit - 1]}…"
 
-    # Risk 2: Unilateral termination
-    if "đơn phương" in text_lower or "chấm dứt ngay" in text_lower or "unilateral" in text_lower:
-        risks.append({
-            "clause": "Điều khoản quyền đơn phương chấm dứt hợp đồng không cần báo trước",
-            "severity": "HIGH",
-            "recommendation": "Đề xuất quy định thời hạn báo trước tối thiểu 30 ngày cho cả hai bên.",
-        })
 
-    # Risk 3: Unlimited liability
-    if "không giới hạn" in text_lower or "unlimited liability" in text_lower:
-        risks.append({
-            "clause": "Trách nhiệm bồi thường thiệt hại không có giới hạn trần",
-            "severity": "MEDIUM",
-            "recommendation": "Đề xuất giới hạn mức bồi thường tối đa bằng 100% tổng giá trị hợp đồng.",
-        })
+def _evidence(text: str, match: re.Match[str], radius: int = 100) -> str:
+    return _compact(text[max(0, match.start() - radius) : match.end() + radius])
 
-    # Fallback risk if none matched directly in demo text
-    if not risks:
-        risks.append({
-            "clause": "Điều khoản phạt vi phạm hợp đồng và quyền đơn phương chấm dứt",
-            "severity": "HIGH",
-            "recommendation": "Đề xuất bổ sung giới hạn phạt vi phạm 8% và báo trước 30 ngày.",
-        })
 
-    docx_download_url = f"/api/v1/legal/download-redline/{uuid.uuid4().hex[:8]}"
+def _finding(
+    clause: str,
+    severity: str,
+    recommendation: str,
+    evidence: str,
+    category: str,
+) -> dict[str, str]:
+    return {
+        "clause": clause,
+        "severity": severity,
+        "recommendation": recommendation,
+        "evidence": evidence,
+        "category": category,
+    }
 
+
+def _first_match(text: str, patterns: list[str]) -> re.Match[str] | None:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match
+    return None
+
+
+def extract_contract_metadata(text: str) -> dict[str, Any]:
+    dates = list(dict.fromkeys(re.findall(
+        r"\b(?:0?[1-9]|[12]\d|3[01])[/-](?:0?[1-9]|1[0-2])[/-](?:19|20)\d{2}\b",
+        text,
+    )))[:8]
+    amounts = list(dict.fromkeys(re.findall(
+        r"\b\d[\d.,\s]{2,}\s*(?:VND|VNĐ|USD|EUR|đồng)\b",
+        text,
+        flags=re.IGNORECASE,
+    )))[:8]
+    payment = _first_match(text, [
+        r"(?:payment|thanh toán).{0,180}(?:\d+\s*(?:days?|ngày)|milestone|đợt)",
+        r"(?:\d+\s*(?:days?|ngày)).{0,100}(?:invoice|hóa đơn)",
+    ])
+    expiry = _first_match(text, [
+        r"(?:expiry|expiration|hết hạn|đến ngày).{0,50}",
+        r"(?:term|thời hạn).{0,100}",
+    ])
+    return {
+        "dates": dates,
+        "amounts": [_compact(value, 80) for value in amounts],
+        "payment_terms": _evidence(text, payment) if payment else None,
+        "expiry_clause": _evidence(text, expiry) if expiry else None,
+    }
+
+
+def audit_contract_text(
+    contract_text: str,
+    document_name: str = "Contract.pdf",
+) -> dict[str, Any]:
+    """Review a contract for material risks and missing baseline clauses."""
+    text = contract_text.strip()
+    risks: list[dict[str, str]] = []
+
+    for match in re.finditer(
+        r"(?:phạt(?:\s+vi\s+phạm)?|penalt(?:y|ies))\D{0,30}(\d{1,3})\s*%",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        rate = int(match.group(1))
+        if rate > 8:
+            risks.append(_finding(
+                f"Contractual penalty of {rate}%",
+                "HIGH" if rate > 20 else "MEDIUM",
+                "Confirm the statutory cap and limit the penalty to the value of the breached obligation.",
+                _evidence(text, match),
+                "PENALTY",
+            ))
+
+    checks = [
+        (
+            [r"unlimited liability", r"liability.{0,40}(?:without|no) limit", r"trách nhiệm.{0,50}không giới hạn"],
+            "Unlimited liability",
+            "HIGH",
+            "Add an aggregate liability cap and narrowly defined carve-outs.",
+            "LIABILITY",
+        ),
+        (
+            [r"customer owns all (?:intellectual property|ip)", r"toàn bộ.{0,30}(?:sở hữu trí tuệ|mã nguồn).{0,30}(?:khách hàng|bên a)"],
+            "Customer ownership of all intellectual property",
+            "HIGH",
+            "Separate pre-existing IP, reusable tools and project deliverables; grant only the rights required for use.",
+            "INTELLECTUAL_PROPERTY",
+        ),
+        (
+            [r"(?:terminate|chấm dứt).{0,50}(?:immediately|ngay lập tức|without notice|không cần báo trước)", r"unilateral termination", r"đơn phương chấm dứt"],
+            "Unilateral or immediate termination",
+            "HIGH",
+            "Require mutual termination rights, a cure period and at least 30 days' written notice.",
+            "TERMINATION",
+        ),
+        (
+            [r"(?:source code|mã nguồn).{0,80}(?:third.part|bên thứ ba|public|công khai)"],
+            "Source-code disclosure restriction",
+            "MEDIUM",
+            "Confirm approved repositories and prohibit disclosure to unapproved third-party AI services.",
+            "CONFIDENTIALITY",
+        ),
+        (
+            [r"indemnif(?:y|ication).{0,120}(?:all|any and all)", r"bồi thường.{0,80}(?:mọi|toàn bộ)"],
+            "Broad indemnification obligation",
+            "MEDIUM",
+            "Limit indemnity to third-party claims caused by a proven breach and retain control of the defense.",
+            "INDEMNITY",
+        ),
+    ]
+    for patterns, clause, severity, recommendation, category in checks:
+        match = _first_match(text, patterns)
+        if match:
+            risks.append(_finding(
+                clause, severity, recommendation, _evidence(text, match), category
+            ))
+
+    required_clauses = [
+        ("PAYMENT", [r"payment", r"thanh toán", r"hóa đơn"], "No payment deadline", "Add invoice timing, due date, currency, tax and late-payment handling."),
+        ("TERMINATION", [r"terminat", r"chấm dứt", r"thanh lý"], "No termination clause", "Add termination for cause/convenience, notice, cure period and post-termination duties."),
+        ("INTELLECTUAL_PROPERTY", [r"intellectual property", r"ownership", r"sở hữu trí tuệ", r"mã nguồn"], "No ownership clause", "Define ownership of background IP, deliverables, source code and license rights."),
+        ("CONFIDENTIALITY", [r"confidential", r"non.disclosure", r"bảo mật", r"nda"], "No confidentiality clause", "Add protected information, exclusions, permitted disclosure and survival period."),
+    ]
+    for category, patterns, clause, recommendation in required_clauses:
+        if not _first_match(text, patterns):
+            risks.append(_finding(clause, "MEDIUM", recommendation, "Not found in the extracted document text.", category))
+
+    raw_score = sum(SEVERITY_WEIGHT[item["severity"]] for item in risks)
+    risk_score = min(100, raw_score)
+    risk_level = "HIGH" if risk_score >= 70 else "MEDIUM" if risk_score >= 35 else "LOW"
     return {
         "document_name": document_name,
         "total_risks_found": len(risks),
+        "risk_score": risk_score,
+        "risk_level": risk_level,
         "risks": risks,
-        "docx_download_url": docx_download_url,
-        "summary": f"Đã rà soát hợp đồng '{document_name}'. Phát hiện {len(risks)} điều khoản có độ rủi ro cao.",
+        "metadata": extract_contract_metadata(text),
+        "docx_download_url": f"/api/v1/legal/download-redline/{uuid.uuid4().hex[:8]}",
+        "summary": f"Reviewed {document_name}: {len(risks)} finding(s), risk score {risk_score}/100.",
+    }
+
+
+def detect_sensitive_data(text: str, headers: list[str] | None = None) -> dict[str, Any]:
+    """Detect common personal and restricted-data indicators without returning values."""
+    source = text or ""
+    normalized_headers = " ".join(headers or []).lower()
+    detectors = {
+        "EMAIL": r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        "PHONE": r"(?<!\d)(?:\+?84|0)(?:\d[ .-]?){8,10}(?!\d)",
+        "PASSPORT": r"\b[A-Z][0-9]{7,8}\b",
+        "CCCD": r"(?<!\d)\d{12}(?!\d)",
+        "IP_ADDRESS": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+    }
+    header_aliases = {
+        "EMAIL": ("email", "e-mail"),
+        "PHONE": ("phone", "mobile", "điện thoại", "sđt"),
+        "PASSPORT": ("passport", "hộ chiếu"),
+        "CCCD": ("cccd", "cmnd", "citizen id"),
+        "ADDRESS": ("address", "địa chỉ"),
+        "SALARY": ("salary", "lương", "thu nhập"),
+    }
+    findings: list[dict[str, Any]] = []
+    for data_type, pattern in detectors.items():
+        count = len(re.findall(pattern, source, flags=re.IGNORECASE))
+        if count:
+            findings.append({"type": data_type, "count": count, "severity": "HIGH" if data_type in {"PASSPORT", "CCCD"} else "MEDIUM"})
+    found_types = {item["type"] for item in findings}
+    for data_type, aliases in header_aliases.items():
+        if data_type not in found_types and any(alias in normalized_headers for alias in aliases):
+            findings.append({"type": data_type, "count": None, "severity": "HIGH" if data_type in {"PASSPORT", "CCCD", "SALARY"} else "MEDIUM"})
+    high = any(item["severity"] == "HIGH" for item in findings)
+    return {
+        "contains_sensitive_data": bool(findings),
+        "requires_legal_approval": high or len(findings) >= 2,
+        "risk_level": "HIGH" if high else "MEDIUM" if findings else "LOW",
+        "findings": findings,
+        "frameworks": ["Internal Privacy Policy", "Vietnam PDPL (Decree 13/2023/ND-CP)"] if findings else [],
+        "suggested_action": "Do not share externally. Minimize or redact data and request Legal approval." if findings else "No common sensitive-data indicators detected.",
+    }
+
+
+def compare_contract_texts(old_text: str, new_text: str) -> dict[str, Any]:
+    """Return readable clause/line changes for two contract versions."""
+    old_lines = [_compact(line, 500) for line in old_text.splitlines() if line.strip()]
+    new_lines = [_compact(line, 500) for line in new_text.splitlines() if line.strip()]
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    changes: list[dict[str, Any]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        changes.append({
+            "type": {"replace": "MODIFIED", "delete": "REMOVED", "insert": "ADDED"}[tag],
+            "old": old_lines[i1:i2],
+            "new": new_lines[j1:j2],
+            "old_location": i1 + 1 if i1 < len(old_lines) else None,
+            "new_location": j1 + 1 if j1 < len(new_lines) else None,
+        })
+        if len(changes) >= 50:
+            break
+    ratio = matcher.ratio()
+    return {
+        "similarity_percent": round(ratio * 100, 1),
+        "total_changes": len(changes),
+        "changes": changes,
+    }
+
+
+def check_software_licenses(filename: str, text: str) -> dict[str, Any]:
+    """Inspect common dependency manifests and flag reciprocal licenses."""
+    dependencies: list[str] = []
+    lower_name = filename.lower()
+    if lower_name.endswith("package.json") or lower_name.endswith(".json"):
+        try:
+            payload = json.loads(text)
+            for key in ("dependencies", "devDependencies", "peerDependencies"):
+                if isinstance(payload.get(key), dict):
+                    dependencies.extend(str(name) for name in payload[key])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    elif "requirements" in lower_name:
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith(("#", "-")):
+                dependencies.append(re.split(r"[<>=!~\[]", line, maxsplit=1)[0].strip())
+
+    known = {
+        "ultralytics": ("AGPL-3.0", "HIGH", "Commercial distribution or network use may require an enterprise license."),
+        "yolov8": ("AGPL-3.0", "HIGH", "Commercial use may require an Ultralytics enterprise license."),
+        "react": ("MIT", "LOW", "Retain the copyright and license notice."),
+        "next": ("MIT", "LOW", "Retain the copyright and license notice."),
+        "fastapi": ("MIT", "LOW", "Retain the copyright and license notice."),
+        "pypdf": ("BSD-3-Clause", "LOW", "Retain the copyright and license notice."),
+    }
+    findings: list[dict[str, str]] = []
+    for dependency in sorted(set(dependencies), key=str.lower):
+        details = known.get(dependency.lower())
+        if details:
+            license_name, severity, action = details
+            findings.append({"package": dependency, "license": license_name, "severity": severity, "action": action})
+
+    declared_patterns = [
+        ("AGPL", "AGPL-3.0", "HIGH"),
+        ("GPL", "GPL", "HIGH"),
+        ("Apache", "Apache-2.0", "LOW"),
+        ("MIT", "MIT", "LOW"),
+        ("BSD", "BSD", "LOW"),
+    ]
+    for marker, license_name, severity in declared_patterns:
+        if re.search(rf"\b{re.escape(marker)}(?:[- ]?\d(?:\.\d)?)?\b", text, flags=re.IGNORECASE) and not any(item["license"] == license_name for item in findings):
+            findings.append({
+                "package": "Manifest declaration",
+                "license": license_name,
+                "severity": severity,
+                "action": "Legal review is required before commercial distribution." if severity == "HIGH" else "Retain the license and attribution notices.",
+            })
+    high = any(item["severity"] == "HIGH" for item in findings)
+    return {
+        "manifest": filename,
+        "dependencies_scanned": len(set(dependencies)),
+        "risk_level": "HIGH" if high else "LOW",
+        "commercial_use_requires_review": high,
+        "findings": findings,
+        "unresolved_dependencies": max(0, len(set(dependencies)) - len([item for item in findings if item["package"] != "Manifest declaration"])),
     }

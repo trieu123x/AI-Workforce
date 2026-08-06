@@ -1365,19 +1365,96 @@ def execute_agent_chat(
                 "phân tích điều khoản và tạo thẻ rủi ro."
             )
             return response_data
-        audit_res = audit_contract_text(message)
-        response_data["tools_executed"].append({
-            "tool_name": "audit_contract_risk",
-            "input": {"text_length": len(message)},
-            "risks_found": audit_res["total_risks_found"],
-        })
-        log_audit_action(db, user.tenant_id, "LEGAL", "audit_contract_risk", {"text_length": len(message)}, {"risks": audit_res["total_risks_found"]})
-
-        response_data["reply"] = (
-            f"Tôi là Legal Counsel AI Agent. Tôi đã rà soát nội dung hợp đồng và phát hiện **{audit_res['total_risks_found']} điều khoản có rủi ro cao**.\n\n"
-            f"Thẻ Phân Tích Rủi Ro & Đề Xuất Sửa Đổi (.docx redline) đã được khởi tạo bên dưới."
+        normalized_legal_message = message.lower()
+        contract_signals = (
+            "hợp đồng", "contract", "agreement", "nda", "msa", "sow", "điều khoản", "clause"
         )
-        response_data["legal_risk_card"] = audit_res
+        review_signals = (
+            "rà soát", "review", "audit", "risk", "rủi ro", "phạt", "penalty",
+            "unlimited liability", "không giới hạn", "đơn phương chấm dứt",
+            "customer owns", "khách hàng sở hữu",
+        )
+        is_contract_review = (
+            any(signal in normalized_legal_message for signal in contract_signals)
+            and (
+                any(signal in normalized_legal_message for signal in review_signals)
+                or len(message) >= 180
+            )
+        )
+        if is_contract_review:
+            audit_res = audit_contract_text(message)
+            response_data["tools_executed"].append({
+                "tool_name": "audit_contract_risk",
+                "input": {"text_length": len(message)},
+                "risks_found": audit_res["total_risks_found"],
+                "risk_score": audit_res["risk_score"],
+            })
+            log_audit_action(
+                db,
+                user.tenant_id,
+                "LEGAL",
+                "audit_contract_risk",
+                {"text_length": len(message)},
+                {"risks": audit_res["total_risks_found"], "risk_score": audit_res["risk_score"]},
+            )
+            response_data["reply"] = (
+                f"Tôi đã rà soát nội dung hợp đồng và phát hiện **{audit_res['total_risks_found']} vấn đề**, "
+                f"với điểm rủi ro **{audit_res['risk_score']}/100 ({audit_res['risk_level']})**.\n\n"
+                "Mỗi phát hiện bên dưới kèm bằng chứng từ nội dung và hành động đề xuất."
+            )
+            response_data["legal_risk_card"] = audit_res
+            return response_data
+
+        search_results = hybrid_search_documents(
+            db,
+            user.tenant_id,
+            message,
+            department="*" if user.role in {"Owner", "Admin", "CEO"} else user.department,
+            collections=None,
+            agent_access=agent.knowledge_access if agent.knowledge_access else None,
+            user_role=user.role,
+            user_department=user.department,
+        )
+        response_data["tools_executed"].append({
+            "tool_name": "hybrid_rag_search",
+            "input": {"query": message, "department": user.department, "acl_applied": True},
+            "result_count": len(search_results),
+        })
+        log_audit_action(
+            db,
+            user.tenant_id,
+            "LEGAL",
+            "hybrid_rag_search",
+            {"query": message, "acl_applied": True},
+            {"count": len(search_results)},
+        )
+        if search_results:
+            response_data["citations"] = search_results
+            excerpts = "\n\n".join(
+                f"{item['content']}\n{item['citation_tag']}"
+                for item in search_results[:2]
+            )
+            response_data["reply"] = (
+                "Theo văn bản pháp luật và chính sách bạn được phép truy cập:\n\n"
+                f"{excerpts}\n\n"
+                "Nếu quyết định này tạo nghĩa vụ pháp lý hoặc chia sẻ dữ liệu nhạy cảm, hãy gửi Legal phê duyệt."
+            )
+            return response_data
+
+        legal_terms = {
+            "indemnification": "Indemnification là nghĩa vụ bồi hoàn cho bên kia khi phát sinh tổn thất hoặc khiếu nại thuộc phạm vi đã cam kết. Cần kiểm tra phạm vi, giới hạn tiền, loại khiếu nại và quyền kiểm soát việc bảo vệ.",
+            "bồi thường": "Điều khoản bồi thường xác định khi nào một bên phải bù đắp tổn thất cho bên kia. Cần làm rõ nguyên nhân, phạm vi, trần trách nhiệm và thủ tục yêu cầu.",
+            "force majeure": "Force majeure (bất khả kháng) là sự kiện ngoài khả năng kiểm soát hợp lý làm cản trở việc thực hiện nghĩa vụ. Điều khoản nên quy định sự kiện, thông báo và hậu quả cụ thể.",
+            "intellectual property": "Intellectual property là quyền đối với tài sản trí tuệ như mã nguồn, thiết kế, nhãn hiệu và tài liệu. Hợp đồng cần tách IP có sẵn với deliverable được tạo trong dự án.",
+        }
+        definition = next(
+            (value for term, value in legal_terms.items() if term in normalized_legal_message),
+            None,
+        )
+        response_data["reply"] = definition or (
+            "Tôi chưa tìm thấy văn bản còn hiệu lực và phù hợp trong phạm vi ACL của bạn. "
+            "Tôi sẽ không tự suy diễn quy định; vui lòng bổ sung tài liệu hoặc gửi Legal Team xác nhận."
+        )
         return response_data
 
     # -----------------------------------------------------------------------
