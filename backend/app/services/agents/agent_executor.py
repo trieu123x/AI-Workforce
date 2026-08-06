@@ -422,7 +422,7 @@ def _extract_employee_search_term(message: str) -> str:
 
 
 _LEAVE_DATE_PATTERN = re.compile(
-    r"\b(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{4})\b"
+    r"\b(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{4})?)\b"
 )
 
 
@@ -432,7 +432,12 @@ def _parse_leave_date(value: str) -> date | None:
         if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", cleaned):
             year, month, day = (int(part) for part in cleaned.split("-"))
         else:
-            day, month, year = (int(part) for part in re.split(r"[/-]", cleaned))
+            parts = [int(part) for part in re.split(r"[/-]", cleaned)]
+            if len(parts) == 2:
+                day, month = parts
+                year = date.today().year
+            else:
+                day, month, year = parts
         return date(year, month, day)
     except (TypeError, ValueError):
         return None
@@ -578,8 +583,8 @@ def _leave_draft_card(
 
 def _leave_follow_up_reply(slots: dict[str, Any], missing_fields: list[str]) -> str:
     labels = {
-        "start_date": "ngày bắt đầu nghỉ (YYYY-MM-DD hoặc DD/MM/YYYY)",
-        "end_date": "ngày kết thúc nghỉ (YYYY-MM-DD hoặc DD/MM/YYYY)",
+        "start_date": "ngày bắt đầu nghỉ (YYYY-MM-DD, DD/MM/YYYY hoặc DD/MM)",
+        "end_date": "ngày kết thúc nghỉ (YYYY-MM-DD, DD/MM/YYYY hoặc DD/MM)",
         "reason": "lý do nghỉ",
     }
     missing_text = ", ".join(f"**{labels[field]}**" for field in missing_fields)

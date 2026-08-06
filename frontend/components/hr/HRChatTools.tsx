@@ -387,9 +387,9 @@ export function HRMessageCard({ attachment }: { attachment: ChatAttachment }) {
           </span>
         </header>
         <div className="hr-profile-grid">
-          <span><small>Ngày bắt đầu</small><strong>{display(payload.start_date, "Cần bổ sung")}</strong></span>
-          <span><small>Ngày kết thúc</small><strong>{display(payload.end_date, "Cần bổ sung")}</strong></span>
-          <span><small>Lý do</small><strong>{display(payload.reason, "Cần bổ sung")}</strong></span>
+          <span><small>Ngày bắt đầu</small><strong>{payload.start_date ? formatDate(payload.start_date) : "Cần bổ sung"}</strong></span>
+          <span><small>Ngày kết thúc</small><strong>{payload.end_date ? formatDate(payload.end_date) : "Cần bổ sung"}</strong></span>
+          <span className="hr-profile-reason"><small>Lý do</small><strong>{display(payload.reason, "Cần bổ sung")}</strong></span>
         </div>
         {!cancelled && missingFields.length > 0 && (
           <p>Còn thiếu: {missingFields.map((field) => missingLabels[field] || field).join(", ")}.</p>

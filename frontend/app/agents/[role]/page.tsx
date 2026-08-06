@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 
 import Sidebar from "@/components/Sidebar";
+import ChatMessageContent from "@/components/chat/ChatMessageContent";
 import {
   ChatAttachment,
   HRChatTools,
@@ -523,7 +524,11 @@ export default function AgentPage() {
                     </div>
                   )}
                   <div className="ai-chat-message-body">
-                    <div className="ai-chat-bubble">{item.content}</div>
+                    <div className="ai-chat-bubble">
+                      {item.sender === "ASSISTANT"
+                        ? <ChatMessageContent content={item.content} />
+                        : item.content}
+                    </div>
                     {item.citations.length > 0 && (
                       <div className="ai-chat-citations">
                         <strong>Nguồn tham khảo</strong>
