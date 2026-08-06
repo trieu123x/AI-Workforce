@@ -392,7 +392,7 @@ export default function AgentPage() {
   const selectNoKnowledge = () => setKnowledgeAccess(["none"]);
 
   if (!hasHydrated || !isAuthenticated) return null;
-  const canConfigure = ["Owner", "Admin"].includes(user?.role || "");
+  const canConfigure = ["Owner", "Admin", "CEO"].includes(user?.role || "");
   const canManageHR = ["Owner", "CEO"].includes(user?.role || "") || (
     user?.department === "HR" && ["Manager", "Admin"].includes(user?.role || "")
   );

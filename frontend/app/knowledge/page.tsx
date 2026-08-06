@@ -15,6 +15,13 @@ interface DocumentItem {
   department_access: string;
   chunk_count: number;
   status: string;
+  version: string;
+  processing_status?: "uploaded" | "parsing" | "chunking" | "embedding" | "indexing" | "ready" | "failed";
+  processing_checkpoint?: "uploaded" | "parsed" | "chunked" | "embedded" | "ready";
+  processing_progress?: number;
+  error_message?: string | null;
+  source_url?: string | null;
+  storage_key?: string | null;
   created_at?: string;
 }
 
@@ -66,7 +73,7 @@ type PipelineStage = "selected" | "uploading" | "parsing" | "chunking" | "embedd
 
 interface UploadPipeline {
   fileName: string;
-  fileSize: number;
+  fileSize: number | null;
   stage: PipelineStage;
   uploadPercent: number;
   stageProgress: number;
@@ -111,6 +118,20 @@ function formatFileSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function pipelineStageFromDocument(item: DocumentItem): PipelineStage {
+  if (item.processing_status === "ready") return "ready";
+  if (item.processing_status && item.processing_status !== "failed") {
+    return item.processing_status === "uploaded" ? "parsing" : item.processing_status;
+  }
+  switch (item.processing_checkpoint) {
+    case "parsed": return "chunking";
+    case "chunked": return "embedding";
+    case "embedded": return "indexing";
+    case "ready": return "ready";
+    default: return "parsing";
+  }
+}
+
 function duplicateConflictFrom(error: unknown): DuplicateConflict | null {
   if (!axios.isAxiosError(error) || error.response?.status !== 409) return null;
   const payload = error.response.data as { detail?: unknown } | undefined;
@@ -150,6 +171,9 @@ export default function KnowledgeBasePage() {
   const [pipeline, setPipeline] = useState<UploadPipeline | null>(null);
   const pollingGeneration = useRef(0);
   const observedBackendProgress = useRef(false);
+  const resumeRequests = useRef(new Set<string>());
+  const resumeCooldowns = useRef(new Map<string, number>());
+  const pipelineDocumentKey = useRef<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -178,11 +202,81 @@ export default function KnowledgeBasePage() {
     return () => window.clearTimeout(timer);
   }, [fetchData, hasHydrated, isAuthenticated, router]);
 
+  const hasActiveDocuments = documents.some((item) =>
+    item.processing_status != null
+    && !["ready", "failed"].includes(item.processing_status)
+  );
+
+  useEffect(() => {
+    if (file) return;
+    const tracked = pipelineDocumentKey.current
+      ? documents.find((item) => `${item.document_id}:${item.version}` === pipelineDocumentKey.current)
+      : documents.find((item) => Boolean(item.storage_key) && !item.source_url && item.processing_status != null);
+    if (!tracked) return;
+
+    pipelineDocumentKey.current = `${tracked.document_id}:${tracked.version}`;
+    const stage = pipelineStageFromDocument(tracked);
+    setPipeline({
+      fileName: tracked.document_name,
+      fileSize: null,
+      stage,
+      uploadPercent: 100,
+      stageProgress: stage === "ready" ? 100 : Math.max(0, Math.min(100, tracked.processing_progress ?? 0)),
+      chunkCount: tracked.chunk_count,
+      failed: tracked.processing_status === "failed",
+      error: tracked.processing_status === "failed" ? tracked.error_message || "Không thể xử lý tài liệu." : undefined,
+    });
+  }, [documents, file]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !hasActiveDocuments) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const { data } = await api.get<DocumentItem[]>("/api/v1/documents");
+        setDocuments(data);
+      } catch {
+        // Keep the current list visible; the next poll can recover after a restart.
+      }
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [hasActiveDocuments, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !["Owner", "Admin", "CEO", "Manager"].includes(user?.role || "")) return;
+    const activeDocuments = documents.filter((item) =>
+      item.processing_status != null
+      && Boolean(item.storage_key)
+      && !item.source_url
+      && !["ready", "failed"].includes(item.processing_status)
+    );
+    for (const item of activeDocuments) {
+      const key = `${item.document_id}:${item.version}`;
+      if (resumeRequests.current.has(key)) continue;
+      if ((resumeCooldowns.current.get(key) || 0) > Date.now()) continue;
+      resumeRequests.current.add(key);
+      void api.post(`/api/v1/documents/${encodeURIComponent(item.document_id)}/retry`, null, {
+        params: { version: item.version },
+      }).then(async () => {
+        const { data } = await api.get<DocumentItem[]>("/api/v1/documents");
+        setDocuments(data);
+      }).catch((reason) => {
+        if (!axios.isAxiosError(reason) || reason.response?.status !== 409) {
+          // A later list poll retries after the backend or network recovers.
+        }
+      }).finally(() => {
+        resumeRequests.current.delete(key);
+        resumeCooldowns.current.set(key, Date.now() + 5000);
+      });
+    }
+  }, [documents, isAuthenticated, user?.role]);
+
   useEffect(() => () => {
     pollingGeneration.current += 1;
   }, []);
 
   const selectFile = (nextFile: File | null) => {
+    pollingGeneration.current += 1;
+    pipelineDocumentKey.current = null;
     setDuplicateWarning(null);
     setMessage(null);
     setError(null);
@@ -216,12 +310,16 @@ export default function KnowledgeBasePage() {
     });
   };
 
-  const pollProcessingStatus = async (documentId: string, generation: number) => {
+  const pollProcessingStatus = async (
+    documentId: string,
+    generation: number,
+    version = "1.0"
+  ) => {
     while (pollingGeneration.current === generation) {
       try {
         const { data } = await api.get<ProcessingStatusResponse>(
           `/api/v1/documents/processing-status/${encodeURIComponent(documentId)}`,
-          { params: { version: "1.0" }, timeout: 5000 }
+          { params: { version }, timeout: 5000 }
         );
         if (pollingGeneration.current !== generation) return;
 
@@ -237,6 +335,7 @@ export default function KnowledgeBasePage() {
             failed: true,
             error: data.error_message || "Không thể xử lý tài liệu.",
           } : current);
+          await fetchData();
           return;
         }
         if (backendStage === "ready" && observedBackendProgress.current) {
@@ -247,6 +346,8 @@ export default function KnowledgeBasePage() {
             stageProgress: 100,
             chunkCount: data.chunk_count,
           } : current);
+          setMessage("Đã lập chỉ mục tài liệu thành công.");
+          await fetchData();
           return;
         }
         if (isActiveBackendStage) {
@@ -291,10 +392,11 @@ export default function KnowledgeBasePage() {
       body.append("collection_name", collection);
       body.append("department_access", department);
       body.append("duplicate_strategy", duplicateStrategy);
-      const { data } = await api.post<{ status: string; chunks_created?: number }>("/api/v1/documents/upload", body, {
-        // Embedding large documents can legitimately take several minutes.
-        // Keep this request open and let the progress endpoint report liveness.
-        timeout: 0,
+      const { data } = await api.post<{
+        status: string;
+        document_id: string;
+        chunks_created?: number;
+      }>("/api/v1/documents/upload", body, {
         onUploadProgress: (progressEvent) => {
           const total = progressEvent.total || file.size;
           const percent = Math.min(100, Math.round((progressEvent.loaded / total) * 100));
@@ -326,7 +428,7 @@ export default function KnowledgeBasePage() {
       setMessage(
         data.status === "KEPT_EXISTING"
           ? "Đã giữ tài liệu cũ. Không có chunk nào bị thay đổi."
-          : "Đã lập chỉ mục tài liệu và thay thế batch chunk thành công."
+          : "Đã lập chỉ mục tài liệu thành công."
       );
       await fetchData();
     } catch (reason) {
@@ -406,6 +508,60 @@ export default function KnowledgeBasePage() {
     }
   };
 
+  const retryDocument = async (documentId: string, version: string) => {
+    const item = documents.find((document) =>
+      document.document_id === documentId && document.version === version
+    );
+    const stage = item ? pipelineStageFromDocument(item) : "embedding";
+    const resumedStatus: DocumentItem["processing_status"] =
+      stage === "selected" || stage === "uploading" ? "parsing" : stage;
+    pipelineDocumentKey.current = `${documentId}:${version}`;
+    setFile(null);
+    setError(null);
+    setPipeline({
+      fileName: item?.document_name || documentId,
+      fileSize: null,
+      stage,
+      uploadPercent: 100,
+      stageProgress: 0,
+      chunkCount: item?.chunk_count,
+      failed: false,
+      error: undefined,
+    });
+    setDocuments((current) => current.map((document) =>
+      document.document_id === documentId && document.version === version
+        ? {
+            ...document,
+            processing_status: resumedStatus,
+            processing_progress: 0,
+            error_message: null,
+            status: stage.toUpperCase(),
+          }
+        : document
+    ));
+    observedBackendProgress.current = false;
+    const generation = ++pollingGeneration.current;
+    void pollProcessingStatus(documentId, generation, version);
+    try {
+      setMessage("Đang tiếp tục từ bước đã lưu gần nhất...");
+      await api.post(`/api/v1/documents/${encodeURIComponent(documentId)}/retry`, null, {
+        params: { version },
+      });
+      setMessage("Đã hoàn tất xử lý tài liệu.");
+      await fetchData();
+    } catch (reason) {
+      const failureMessage = messageFrom(reason);
+      setError(failureMessage);
+      setPipeline((current) => current ? {
+        ...current,
+        failed: true,
+        error: failureMessage,
+      } : current);
+    } finally {
+      if (pollingGeneration.current === generation) pollingGeneration.current += 1;
+    }
+  };
+
   if (!hasHydrated || !isAuthenticated) return null;
   const canManage = ["Owner", "Admin", "CEO", "Manager"].includes(user?.role || "");
 
@@ -428,8 +584,8 @@ export default function KnowledgeBasePage() {
               <h2 style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 750, marginBottom: 14 }}><Database size={18} /> Tài liệu ({documents.length})</h2>
               {loading ? <p>Đang tải...</p> : documents.map((item) => (
                 <div key={`${item.document_id}-${item.collection_name}`} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "12px 0", borderTop: "1px solid var(--border)" }}>
-                  <div style={{ display: "flex", gap: 10 }}><FileText size={19} /><div><strong>{item.document_name}</strong><div style={{ fontSize: 12, color: "var(--text-muted)" }}>{item.collection_name} · {item.department_access} · {item.chunk_count} chunks</div></div></div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 7 }}><span className="ta-badge ta-badge-success">{item.status}</span>{canManage && <button className="ta-btn ta-btn-ghost" aria-label="Xóa tài liệu" onClick={() => void deleteDocument(item.document_id)}><Trash2 size={14} /></button>}</div>
+                  <div style={{ display: "flex", gap: 10 }}><FileText size={19} /><div><strong>{item.document_name}</strong><div style={{ fontSize: 12, color: "var(--text-muted)" }}>{item.collection_name} · {item.department_access} · {item.chunk_count} chunks{item.processing_status && !["ready", "failed"].includes(item.processing_status) ? ` · ${item.processing_progress ?? 0}%` : ""}</div>{item.error_message && item.processing_status === "failed" && <div style={{ marginTop: 3, maxWidth: 420, color: "var(--danger)", fontSize: 11 }}>{item.error_message}</div>}</div></div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7 }}>{item.processing_status && !["ready", "failed"].includes(item.processing_status) && <Loader2 size={14} className="animate-spin" color="var(--primary)" />}<span className={`ta-badge ${item.processing_status === "failed" ? "ta-badge-danger" : item.processing_status === "ready" ? "ta-badge-success" : "ta-badge-info"}`}>{item.status}</span>{canManage && item.processing_status === "failed" && <button className="ta-btn ta-btn-ghost" onClick={() => void retryDocument(item.document_id, item.version)}>Thử lại</button>}{canManage && <button className="ta-btn ta-btn-ghost" aria-label="Xóa tài liệu" onClick={() => void deleteDocument(item.document_id)}><Trash2 size={14} /></button>}</div>
                 </div>
               ))}
               {!loading && documents.length === 0 && <p style={{ color: "var(--text-muted)" }}>Chưa có tài liệu bạn được phép xem.</p>}
@@ -531,7 +687,7 @@ function DocumentProcessingPipeline({ pipeline }: { pipeline: UploadPipeline }) 
       <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 13px", background: "#F8FAFC", borderBottom: "1px solid var(--border)" }}>
         <div style={{ minWidth: 0 }}>
           <strong style={{ display: "block", fontSize: 13 }}>{heading}</strong>
-          <span style={{ display: "block", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2, color: "var(--text-muted)", fontSize: 11 }}>{pipeline.fileName} · {formatFileSize(pipeline.fileSize)}</span>
+          <span style={{ display: "block", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2, color: "var(--text-muted)", fontSize: 11 }}>{pipeline.fileName}{pipeline.fileSize != null ? ` · ${formatFileSize(pipeline.fileSize)}` : ""}</span>
         </div>
         {isReady && pipeline.chunkCount != null && <span className="ta-badge ta-badge-success" style={{ flex: "0 0 auto" }}>{pipeline.chunkCount} chunks</span>}
       </header>

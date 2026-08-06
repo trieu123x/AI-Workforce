@@ -10,10 +10,9 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 export const api = axios.create({
   baseURL: API_BASE,
   withCredentials: true, // Sends HttpOnly refresh_token cookie automatically
-  // AI workflows may call multiple tools. Fast paths should normally finish in
-  // a few seconds, while this ceiling prevents legitimate long jobs from being
-  // reported as a generic Network Error after only 30 seconds.
-  timeout: 90000,
+  // Document embedding and other AI pipelines can legitimately take several
+  // minutes. Axios uses 0 to disable the client-side response timeout.
+  timeout: 0,
 });
 
 // ── Request interceptor: Inject Access Token from localStorage ──

@@ -58,3 +58,12 @@ def save_original_file(
 
     storage_key = target.relative_to(root).as_posix()
     return storage_key, hashlib.sha256(data).hexdigest()
+
+
+def read_original_file(storage_key: str) -> bytes:
+    """Read a stored original while preventing paths from escaping the storage root."""
+    root = _storage_root()
+    target = (root / storage_key).resolve()
+    if root != target and root not in target.parents:
+        raise ValueError("Invalid knowledge storage key")
+    return target.read_bytes()

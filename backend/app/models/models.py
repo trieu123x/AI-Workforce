@@ -995,6 +995,9 @@ class KnowledgeDocument(Base):
     document_id: Mapped[str] = mapped_column(String(100), nullable=False)
     file_name: Mapped[str] = mapped_column(String(255), nullable=False)
     document_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    collection_name: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="General Knowledge"
+    )
     department: Mapped[str] = mapped_column(String(50), nullable=False, default="ALL")
     document_type: Mapped[str] = mapped_column(String(50), nullable=False, default="knowledge")
     version: Mapped[str] = mapped_column(String(50), nullable=False, default="1.0")
@@ -1005,6 +1008,13 @@ class KnowledgeDocument(Base):
     processing_progress: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0
     )
+    processing_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    processing_checkpoint: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="uploaded"
+    )
+    parsed_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidentiality: Mapped[str] = mapped_column(
         String(30), nullable=False, default="internal"
     )
@@ -1091,7 +1101,7 @@ class DocumentChunk(Base):
     collection_name: Mapped[str] = mapped_column(String(100), default="General Knowledge")
     department_access: Mapped[str] = mapped_column(String(50), default="ALL")
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    section_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    section_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)

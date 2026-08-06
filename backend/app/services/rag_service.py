@@ -613,6 +613,7 @@ def ingest_document(
 
     record.file_name = resolved_source_file
     record.document_title = resolved_document_title
+    record.collection_name = collection_name
     record.department = department_access
     record.document_type = document_type
     record.status = status
@@ -718,6 +719,7 @@ def ingest_document(
         )
         record.file_name = resolved_source_file
         record.document_title = resolved_document_title
+        record.collection_name = collection_name
         record.department = department_access
         record.document_type = document_type
         record.status = status
@@ -821,8 +823,10 @@ def ingest_document(
             chunks_created.append(chunk)
 
         record.chunk_count = len(chunks_created)
+        record.processing_checkpoint = "ready"
         record.processing_status = "ready"
         record.processing_progress = 100
+        record.parsed_text = None
         db.commit()
         return chunks_created
     except Exception as exc:

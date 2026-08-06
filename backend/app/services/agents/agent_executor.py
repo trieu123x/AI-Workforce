@@ -129,6 +129,19 @@ def _require_tool(agent: AIAgent, tool_name: str) -> None:
         )
 
 
+def _can_use_tool(agent: AIAgent, tool_name: str) -> bool:
+    """Return whether an optional tool is enabled by the agent configuration."""
+    _repair_hr_agent_capabilities(agent)
+    tools = set(agent.tools_access or [])
+    allowed = set(agent.allowed_actions or [])
+    denied = set(agent.disallowed_actions or [])
+    return (
+        tool_name not in denied
+        and tool_name in tools
+        and (not allowed or tool_name in allowed)
+    )
+
+
 def _employee_profile_payload(
     db: Session,
     actor: User,
@@ -1343,7 +1356,15 @@ def execute_agent_chat(
     # 3. LEGAL Agent Processing (Contract Risk Audit & Redline)
     # -----------------------------------------------------------------------
     elif role_code_upper == "LEGAL":
-        _require_tool(agent, "audit_contract_risk")
+        if not _can_use_tool(agent, "audit_contract_risk"):
+            response_data["reply"] = (
+                "Tôi là Legal Counsel AI và đã nhận nội dung bạn gửi. "
+                "Công cụ rà soát rủi ro hợp đồng `audit_contract_risk` hiện chưa "
+                "được bật cho AI Employee này, nên tôi không tự ý thực thi công cụ. "
+                "Admin hoặc Owner có thể bật công cụ trong phần Cấu hình nếu cần "
+                "phân tích điều khoản và tạo thẻ rủi ro."
+            )
+            return response_data
         audit_res = audit_contract_text(message)
         response_data["tools_executed"].append({
             "tool_name": "audit_contract_risk",

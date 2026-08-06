@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 RUN addgroup --system app && adduser --system --ingroup app app
 COPY --chown=app:app . .
+RUN mkdir -p /app/data/knowledge && chown -R app:app /app/data
 USER app
 
 # Expose port

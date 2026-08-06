@@ -245,6 +245,19 @@ alembic upgrade head
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
+Worker ở terminal thứ hai chỉ cần cho các workflow hỗ trợ khách hàng chạy nền:
+
+```bash
+cd backend
+python -m app.worker
+```
+
+Upload tài liệu không phụ thuộc worker hay Redis. Backend xử lý trực tiếp và commit
+checkpoint sau từng stage: `uploaded -> parsed -> chunked -> embedded -> ready`.
+Nếu tiến trình dừng giữa một stage, trang Knowledge sẽ lấy bản ghi dang dở và tiếp tục
+từ checkpoint trước đó. Ví dụ, dừng giữa embedding sẽ giữ nguyên chunks đã lưu và tạo
+lại toàn bộ embedding từ checkpoint `chunked`.
+
 Kích hoạt virtual environment trước khi cài dependency:
 
 - PowerShell: `.venv\Scripts\Activate.ps1`

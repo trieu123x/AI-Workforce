@@ -28,6 +28,7 @@ import {
   Bell,
   Cable,
   Headphones,
+  SlidersHorizontal,
 } from "lucide-react";
 
 // ─── Nav Config ──────────────────────────────────────────────────────────────
@@ -301,6 +302,15 @@ export default function Sidebar({ agentStatuses = {} }: SidebarProps) {
         >
           AI Employees
         </div>
+
+        {(["Owner", "Admin", "CEO"].includes(user?.role || "")) && (
+          <NavItem
+            icon={<SlidersHorizontal size={18} />}
+            label="Cấu hình AI Employees"
+            href="/ai-editor"
+            active={pathname === "/ai-editor"}
+          />
+        )}
 
         {/* Expandable group */}
         <div>

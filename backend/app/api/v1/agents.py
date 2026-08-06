@@ -14,7 +14,7 @@ from app.schemas.schemas import AIAgentResponse
 from app.services.auth_service import DEFAULT_AGENT_TOOLS, ensure_tenant_default_agents
 
 router = APIRouter(prefix="/agents", tags=["AI Agents"])
-AGENT_CONFIG_ROLES = {"Owner", "Admin"}
+AGENT_CONFIG_ROLES = {"Owner", "Admin", "CEO"}
 TOOL_DESCRIPTIONS = {
     "hybrid_rag_search": "Tìm và trích dẫn chính sách trong kho tri thức.",
     "get_employee_basic_profile": "Đọc riêng thông tin công việc cơ bản qua Policy Engine.",
@@ -181,7 +181,7 @@ def get_agent(
 @router.get(
     "/{role_code}/configuration-options",
     summary="List tools and governed knowledge available to an AI Employee",
-    dependencies=[Depends(RoleRequired("Owner", "Admin"))],
+    dependencies=[Depends(RoleRequired("Owner", "Admin", "CEO"))],
 )
 def get_agent_configuration_options(
     role_code: str,
@@ -234,7 +234,7 @@ def get_agent_configuration_options(
     "/{role_code}",
     response_model=AIAgentResponse,
     summary="Configure an AI Employee",
-    dependencies=[Depends(RoleRequired("Owner", "Admin"))],
+    dependencies=[Depends(RoleRequired("Owner", "Admin", "CEO"))],
 )
 def update_agent(
     role_code: str,
@@ -303,7 +303,7 @@ def update_agent(
 @router.patch(
     "/{role_code}/toggle",
     summary="Toggle AI Employee active status",
-    dependencies=[Depends(RoleRequired("Owner", "Admin"))],
+    dependencies=[Depends(RoleRequired("Owner", "Admin", "CEO"))],
 )
 def toggle_agent(
     role_code: str,

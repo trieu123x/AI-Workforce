@@ -33,18 +33,27 @@ def test_get_agent_by_role(client, ceo_token_headers):
     agent = response.json()
     assert agent["role_code"] == "HR"
     assert agent["avatar_emoji"] == "🧑‍💼"
-    assert agent["system_prompt"] == "Managed by workspace administrators."
-    assert agent["tools_access"] == []
+    assert agent["system_prompt"] != "Managed by workspace administrators."
+    assert isinstance(agent["tools_access"], list)
 
 
-def test_only_admin_or_owner_can_configure_agent(
+def test_owner_admin_and_ceo_can_configure_agent(
     client,
     ceo_token_headers,
     transactional_db_session,
 ):
-    """Business CEO can use HR data, while Admin/Owner control AI configuration."""
-    forbidden = client.patch("/api/v1/agents/HR/toggle", headers=ceo_token_headers)
-    assert forbidden.status_code == 403
+    """CEO is a top-level workspace role and can configure AI alongside Owner/Admin."""
+    ceo_options = client.get(
+        "/api/v1/agents/HR/configuration-options",
+        headers=ceo_token_headers,
+    )
+    assert ceo_options.status_code == 200, ceo_options.text
+    toggled_by_ceo = client.patch(
+        "/api/v1/agents/HR/toggle",
+        headers=ceo_token_headers,
+    )
+    assert toggled_by_ceo.status_code == 200
+    client.patch("/api/v1/agents/HR/toggle", headers=ceo_token_headers)
 
     admin = transactional_db_session.query(User).filter(
         User.email == "legal.counsel@company.com"

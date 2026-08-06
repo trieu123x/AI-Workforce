@@ -13,6 +13,7 @@ from app.services.embedding_service import (
     build_embedding_text,
     calculate_content_hash,
     get_embedding_service,
+    normalize_embedding_device,
 )
 from app.api.v1.documents import _parse_allowed_roles
 
@@ -33,6 +34,12 @@ def test_chunking_respects_size_and_overlap():
         chunks[-2]["content"].split()[-CHUNK_OVERLAP_TOKENS:]
         == chunks[-1]["content"].split()[:CHUNK_OVERLAP_TOKENS]
     )
+
+
+def test_embedding_gpu_alias_uses_pytorch_cuda_device():
+    assert normalize_embedding_device("gpu") == "cuda"
+    assert normalize_embedding_device("NVIDIA") == "cuda"
+    assert normalize_embedding_device("cuda:0") == "cuda:0"
 
 
 def test_chunking_preserves_markdown_header_context():
@@ -241,6 +248,7 @@ def test_upload_duplicate_chunks_requires_explicit_replace_or_keep_old(
         headers=ceo_token_headers,
     )
     assert first.status_code == 201
+    assert first.json()["status"] == "INDEXED"
     transactional_db_session.expire_all()
     original_chunks = transactional_db_session.query(DocumentChunk).filter(
         DocumentChunk.document_id == "duplicate-decision-policy",

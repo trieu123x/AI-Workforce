@@ -320,7 +320,7 @@ def test_chat_history_feedback_and_task_conversion(client, employee_token_header
     assert task.status_code == 201
 
 
-def test_pdf_upload_is_extracted_and_indexed(client, ceo_token_headers):
+def test_pdf_upload_is_checkpointed_and_indexed(client, ceo_token_headers):
     buffer = BytesIO()
     document = canvas.Canvas(buffer)
     document.drawString(72, 760, "Internal warranty policy: twelve months.")

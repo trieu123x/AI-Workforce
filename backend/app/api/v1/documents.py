@@ -1,18 +1,14 @@
 """Enterprise Knowledge Base with document ACL, collections and file ingestion."""
 
-import csv
-import io
 import ipaddress
 import json
 import re
 import socket
 import uuid
-import zipfile
 from datetime import date
 from html.parser import HTMLParser
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
-from xml.etree import ElementTree
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
@@ -23,6 +19,11 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import get_current_active_user
 from app.models.models import DocumentChunk, KnowledgeDocument, User
+from app.services.document_ingestion import (
+    DocumentAlreadyProcessing,
+    resume_document_ingestion,
+)
+from app.services.document_parser import DocumentParseError, extract_file_text
 from app.services.knowledge_storage import save_original_file
 from app.services.embedding_service import calculate_content_hash
 from app.services.rag_service import (
@@ -246,6 +247,8 @@ def _set_document_processing_status(
     governance: dict[str, Any],
     processing_status: str,
     processing_progress: int = 0,
+    collection_name: str = "General Knowledge",
+    reset_attempts: bool = False,
     storage_key: str | None = None,
     source_hash: str | None = None,
     source_url: str | None = None,
@@ -266,12 +269,17 @@ def _set_document_processing_status(
         db.add(record)
     record.file_name = file_name
     record.document_title = document_title
+    record.collection_name = collection_name
     record.department = department
     record.document_type = document_type
     record.version = version
     record.status = governance["status"]
     record.processing_status = processing_status
     record.processing_progress = max(0, min(100, processing_progress))
+    if reset_attempts:
+        record.processing_attempts = 0
+        record.processing_checkpoint = "uploaded"
+        record.parsed_text = None
     record.confidentiality = governance["confidentiality"]
     record.allowed_roles = governance["allowed_roles"]
     record.effective_date = governance["effective_date"]
@@ -365,6 +373,8 @@ def _document_visible_to_user(document: KnowledgeDocument, current_user: User) -
         return True
     if document.department not in {"ALL", current_user.department}:
         return False
+    if current_user.role == "Manager" and document.processing_status != "ready":
+        return document.created_by_id == current_user.id
     today = date.today()
     if document.status != "active" or document.processing_status != "ready":
         return False
@@ -377,64 +387,15 @@ def _document_visible_to_user(document: KnowledgeDocument, current_user: User) -
     return not allowed_roles or bool(principals.intersection(allowed_roles))
 
 
-def _extract_docx(data: bytes) -> str:
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            xml = archive.read("word/document.xml")
-        root = ElementTree.fromstring(xml)
-        namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-        paragraphs: list[str] = []
-        for paragraph in root.iter(f"{namespace}p"):
-            paragraph_text = "".join(
-                node.text or "" for node in paragraph.iter(f"{namespace}t")
-            ).strip()
-            if not paragraph_text:
-                continue
-            style = paragraph.find(f"{namespace}pPr/{namespace}pStyle")
-            style_name = (
-                style.get(f"{namespace}val", "").lower() if style is not None else ""
-            )
-            heading_match = re.match(r"heading(\d+)", style_name)
-            if heading_match:
-                level = min(int(heading_match.group(1)), 6)
-                paragraph_text = f"{'#' * level} {paragraph_text}"
-            paragraphs.append(paragraph_text)
-        return "\n".join(text for text in paragraphs if text.strip())
-    except (KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
-        raise HTTPException(status_code=422, detail="Invalid DOCX file") from exc
-
-
-def _extract_pdf(data: bytes) -> str:
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:
-        raise HTTPException(status_code=503, detail="PDF parser is not installed") from exc
-    try:
-        reader = PdfReader(io.BytesIO(data))
-        return "\n\n".join(
-            f"[[PAGE:{page_number}]]\n{page.extract_text() or ''}"
-            for page_number, page in enumerate(reader.pages, start=1)
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail="Invalid or encrypted PDF file") from exc
-
-
 def _extract_file_text(filename: str, data: bytes) -> str:
-    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if extension in {"txt", "md"}:
-        return data.decode("utf-8-sig")
-    if extension == "csv":
-        decoded = data.decode("utf-8-sig")
-        rows = csv.reader(io.StringIO(decoded))
-        return "\n".join(" | ".join(cell.strip() for cell in row) for row in rows)
-    if extension == "docx":
-        return _extract_docx(data)
-    if extension == "pdf":
-        return _extract_pdf(data)
-    raise HTTPException(
-        status_code=415,
-        detail="Supported file types: PDF, DOCX, TXT, MD and CSV",
-    )
+    try:
+        return extract_file_text(filename, data)
+    except DocumentParseError as exc:
+        message = str(exc)
+        status_code = 415 if message.startswith("Supported file types") else 422
+        if message == "PDF parser is not installed":
+            status_code = 503
+        raise HTTPException(status_code=status_code, detail=message) from exc
 
 
 def _validate_public_url(url: str) -> None:
@@ -495,12 +456,19 @@ def list_documents(
         ).all()
         if _chunk_visible_to_user(chunk, current_user)
     ]
+    record_query = db.query(KnowledgeDocument).filter(
+        KnowledgeDocument.tenant_id == current_user.tenant_id,
+    )
+    if current_user.role in KB_MANAGERS:
+        record_query = record_query.filter(or_(
+            KnowledgeDocument.status == "active",
+            KnowledgeDocument.processing_status != "ready",
+        ))
+    else:
+        record_query = record_query.filter(KnowledgeDocument.status == "active")
     records = [
         document
-        for document in db.query(KnowledgeDocument).filter(
-            KnowledgeDocument.tenant_id == current_user.tenant_id,
-            KnowledgeDocument.status == "active",
-        ).order_by(KnowledgeDocument.created_at.desc()).all()
+        for document in record_query.order_by(KnowledgeDocument.created_at.desc()).all()
         if _document_visible_to_user(document, current_user)
     ]
     docs: dict[str, dict[str, Any]] = {
@@ -510,7 +478,7 @@ def list_documents(
             "document_title": document.document_title,
             "document_type": document.document_type,
             "version": document.version,
-            "collection_name": "General Knowledge",
+            "collection_name": document.collection_name,
             "department_access": document.department,
             "effective_date": (
                 document.effective_date.isoformat() if document.effective_date else None
@@ -520,10 +488,13 @@ def list_documents(
             ),
             "document_status": document.status,
             "processing_status": document.processing_status,
+            "processing_checkpoint": document.processing_checkpoint,
             "processing_progress": document.processing_progress,
+            "processing_attempts": document.processing_attempts,
             "confidentiality": document.confidentiality,
             "allowed_roles": document.allowed_roles or [],
             "source_file": document.file_name,
+            "source_url": document.source_url,
             "storage_key": document.storage_key,
             "chunk_count": document.chunk_count,
             "status": document.processing_status.upper(),
@@ -590,11 +561,63 @@ def get_document_processing_status(
         "document_name": record.file_name,
         "version": record.version,
         "processing_status": record.processing_status,
+        "processing_checkpoint": record.processing_checkpoint,
         "processing_progress": record.processing_progress,
+        "processing_attempts": record.processing_attempts,
         "chunk_count": record.chunk_count,
         "embedding_model": record.embedding_model,
         "error_message": record.error_message,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+    }
+
+
+@router.post(
+    "/{document_id}/retry",
+    summary="Resume document ingestion from its last completed checkpoint",
+)
+def retry_document_ingestion(
+    document_id: str,
+    version: str = "1.0",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> dict:
+    if current_user.role not in KB_MANAGERS:
+        raise HTTPException(status_code=403, detail="Insufficient permission to manage knowledge")
+    record = db.query(KnowledgeDocument).filter(
+        KnowledgeDocument.tenant_id == current_user.tenant_id,
+        KnowledgeDocument.document_id == document_id,
+        KnowledgeDocument.version == version,
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if current_user.role == "Manager" and record.department not in {
+        "ALL",
+        current_user.department,
+    }:
+        raise HTTPException(status_code=403, detail="Manager cannot retry this document")
+    if record.processing_status == "ready":
+        return {
+            "success": True,
+            "document_id": record.document_id,
+            "version": record.version,
+            "processing_status": "ready",
+            "processing_checkpoint": "ready",
+            "chunks_created": record.chunk_count,
+        }
+    if not record.storage_key:
+        raise HTTPException(status_code=409, detail="Original document is not available")
+
+    try:
+        chunks = resume_document_ingestion(db, record.id)
+    except DocumentAlreadyProcessing as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "document_id": record.document_id,
+        "version": record.version,
+        "processing_status": "ready",
+        "processing_checkpoint": "ready",
+        "chunks_created": len(chunks),
     }
 
 
@@ -699,9 +722,7 @@ def upload_document(
     normalized_duplicate_strategy = duplicate_strategy.strip().lower()
     if normalized_duplicate_strategy not in VALID_DUPLICATE_STRATEGIES:
         raise HTTPException(status_code=422, detail="Unsupported duplicate strategy")
-    # This endpoint performs PDF parsing and local model inference. Keeping the
-    # handler synchronous lets FastAPI run it in its worker thread pool instead
-    # of blocking the async event loop for the duration of embedding.
+    # Validate duplicates before persisting a new durable pipeline record.
     data = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File exceeds the 10 MB limit")
@@ -717,12 +738,29 @@ def upload_document(
     resolved_title = document_title.strip() if document_title else filename
     resolved_type = document_type.strip().lower()
     resolved_version = version.strip()
-    try:
-        content = _extract_file_text(filename, data).strip()
-        if not content:
-            raise HTTPException(status_code=422, detail="No readable text found in the file")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=422, detail="Text file must use UTF-8 encoding") from exc
+    in_progress_record = db.query(KnowledgeDocument).filter(
+        KnowledgeDocument.tenant_id == current_user.tenant_id,
+        KnowledgeDocument.document_id == resolved_document_id,
+        KnowledgeDocument.version == resolved_version,
+        KnowledgeDocument.processing_status.in_(
+            ("uploaded", "parsing", "chunking", "embedding", "indexing")
+        ),
+    ).first()
+    if in_progress_record:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DOCUMENT_PROCESSING",
+                "message": "This document version is already being processed",
+                "document_id": resolved_document_id,
+                "version": resolved_version,
+                "processing_status": in_progress_record.processing_status,
+                "processing_progress": in_progress_record.processing_progress,
+            },
+        )
+    content = _extract_file_text(filename, data).strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="No readable text found in the file")
 
     duplicates, incoming_chunk_count = _duplicate_chunk_report(
         db,
@@ -776,7 +814,7 @@ def upload_document(
         )
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Could not store uploaded file") from exc
-    _set_document_processing_status(
+    record = _set_document_processing_status(
         db,
         user=current_user,
         document_id=resolved_document_id,
@@ -786,34 +824,23 @@ def upload_document(
         document_type=resolved_type,
         version=resolved_version,
         governance=governance,
-        processing_status="parsing",
-        storage_key=storage_key,
-        source_hash=source_hash,
-    )
-    chunks = ingest_document(
-        db=db,
-        tenant_id=current_user.tenant_id,
-        document_name=filename,
-        content=content,
-        department_access=department,
+        processing_status="uploaded",
+        processing_progress=0,
         collection_name=collection_name.strip() or "General Knowledge",
-        document_id=resolved_document_id,
-        document_title=resolved_title,
-        document_type=resolved_type,
-        version=resolved_version,
-        source_file=filename,
+        reset_attempts=True,
         storage_key=storage_key,
         source_hash=source_hash,
-        created_by_id=current_user.id,
-        **governance,
     )
-    _notify_indexed(db, current_user, filename, len(chunks))
+    chunks = resume_document_ingestion(db, record.id)
     return {
         "success": True,
         "document_id": resolved_document_id,
         "document_name": filename,
+        "version": resolved_version,
         "status": "INDEXED",
         "processing_status": "ready",
+        "processing_checkpoint": "ready",
+        "processing_progress": 100,
         "storage_key": storage_key,
         "embedding_model": chunks[0].embedding_model if chunks else None,
         "chunks_created": len(chunks),

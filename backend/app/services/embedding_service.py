@@ -15,6 +15,14 @@ from app.services.ai_service_client import get_ai_service_client
 _TOKEN_PATTERN = re.compile(r"\S+")
 
 
+def normalize_embedding_device(value: str) -> str:
+    """Map user-facing GPU aliases to device names understood by PyTorch."""
+    normalized = value.strip().lower()
+    if normalized in {"gpu", "nvidia"}:
+        return "cuda"
+    return normalized
+
+
 def calculate_content_hash(text: str) -> str:
     normalized = " ".join(text.split())
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -41,6 +49,7 @@ class EmbeddingService:
         self.batch_size = settings.EMBEDDING_BATCH_SIZE
         self.max_retries = settings.EMBEDDING_MAX_RETRIES
         self.version = settings.EMBEDDING_VERSION
+        self.device = normalize_embedding_device(settings.EMBEDDING_DEVICE)
         self._model = None
         self._remote_max_input_tokens: int | None = None
 
@@ -81,9 +90,16 @@ class EmbeddingService:
             raise RuntimeError(
                 "Install requirements-embeddings.txt to use sentence_transformers"
             ) from exc
+        if self.device.startswith("cuda"):
+            import torch
+
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "Embedding device is CUDA but PyTorch cannot access an NVIDIA GPU"
+                )
         self._model = SentenceTransformer(
             self.configured_model_name,
-            device=settings.EMBEDDING_DEVICE,
+            device=self.device,
             cache_folder=settings.EMBEDDING_CACHE_FOLDER,
             local_files_only=settings.EMBEDDING_LOCAL_FILES_ONLY,
         )
@@ -170,7 +186,7 @@ class EmbeddingService:
                 if attempt + 1 < self.max_retries:
                     time.sleep(2**attempt)
         raise RuntimeError(
-            f"Embedding failed after {self.max_retries} attempts"
+            f"Embedding failed after {self.max_retries} attempts: {last_error}"
         ) from last_error
 
     def embed_query(self, question: str) -> list[float]:
