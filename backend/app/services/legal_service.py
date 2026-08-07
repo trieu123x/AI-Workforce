@@ -12,6 +12,8 @@ import re
 import uuid
 from typing import Any
 
+from app.services.contract_review import review_contract
+
 
 SEVERITY_WEIGHT = {"HIGH": 25, "MEDIUM": 12, "LOW": 5}
 
@@ -79,92 +81,12 @@ def audit_contract_text(
     contract_text: str,
     document_name: str = "Contract.pdf",
 ) -> dict[str, Any]:
-    """Review a contract for material risks and missing baseline clauses."""
-    text = contract_text.strip()
-    risks: list[dict[str, str]] = []
-
-    for match in re.finditer(
-        r"(?:phạt(?:\s+vi\s+phạm)?|penalt(?:y|ies))\D{0,30}(\d{1,3})\s*%",
-        text,
-        flags=re.IGNORECASE,
-    ):
-        rate = int(match.group(1))
-        if rate > 8:
-            risks.append(_finding(
-                f"Contractual penalty of {rate}%",
-                "HIGH" if rate > 20 else "MEDIUM",
-                "Confirm the statutory cap and limit the penalty to the value of the breached obligation.",
-                _evidence(text, match),
-                "PENALTY",
-            ))
-
-    checks = [
-        (
-            [r"unlimited liability", r"liability.{0,40}(?:without|no) limit", r"trách nhiệm.{0,50}không giới hạn"],
-            "Unlimited liability",
-            "HIGH",
-            "Add an aggregate liability cap and narrowly defined carve-outs.",
-            "LIABILITY",
-        ),
-        (
-            [r"customer owns all (?:intellectual property|ip)", r"toàn bộ.{0,30}(?:sở hữu trí tuệ|mã nguồn).{0,30}(?:khách hàng|bên a)"],
-            "Customer ownership of all intellectual property",
-            "HIGH",
-            "Separate pre-existing IP, reusable tools and project deliverables; grant only the rights required for use.",
-            "INTELLECTUAL_PROPERTY",
-        ),
-        (
-            [r"(?:terminate|chấm dứt).{0,50}(?:immediately|ngay lập tức|without notice|không cần báo trước)", r"unilateral termination", r"đơn phương chấm dứt"],
-            "Unilateral or immediate termination",
-            "HIGH",
-            "Require mutual termination rights, a cure period and at least 30 days' written notice.",
-            "TERMINATION",
-        ),
-        (
-            [r"(?:source code|mã nguồn).{0,80}(?:third.part|bên thứ ba|public|công khai)"],
-            "Source-code disclosure restriction",
-            "MEDIUM",
-            "Confirm approved repositories and prohibit disclosure to unapproved third-party AI services.",
-            "CONFIDENTIALITY",
-        ),
-        (
-            [r"indemnif(?:y|ication).{0,120}(?:all|any and all)", r"bồi thường.{0,80}(?:mọi|toàn bộ)"],
-            "Broad indemnification obligation",
-            "MEDIUM",
-            "Limit indemnity to third-party claims caused by a proven breach and retain control of the defense.",
-            "INDEMNITY",
-        ),
-    ]
-    for patterns, clause, severity, recommendation, category in checks:
-        match = _first_match(text, patterns)
-        if match:
-            risks.append(_finding(
-                clause, severity, recommendation, _evidence(text, match), category
-            ))
-
-    required_clauses = [
-        ("PAYMENT", [r"payment", r"thanh toán", r"hóa đơn"], "No payment deadline", "Add invoice timing, due date, currency, tax and late-payment handling."),
-        ("TERMINATION", [r"terminat", r"chấm dứt", r"thanh lý"], "No termination clause", "Add termination for cause/convenience, notice, cure period and post-termination duties."),
-        ("INTELLECTUAL_PROPERTY", [r"intellectual property", r"ownership", r"sở hữu trí tuệ", r"mã nguồn"], "No ownership clause", "Define ownership of background IP, deliverables, source code and license rights."),
-        ("CONFIDENTIALITY", [r"confidential", r"non.disclosure", r"bảo mật", r"nda"], "No confidentiality clause", "Add protected information, exclusions, permitted disclosure and survival period."),
-    ]
-    for category, patterns, clause, recommendation in required_clauses:
-        if not _first_match(text, patterns):
-            risks.append(_finding(clause, "MEDIUM", recommendation, "Not found in the extracted document text.", category))
-
-    raw_score = sum(SEVERITY_WEIGHT[item["severity"]] for item in risks)
-    risk_score = min(100, raw_score)
-    risk_level = "HIGH" if risk_score >= 70 else "MEDIUM" if risk_score >= 35 else "LOW"
-    return {
-        "document_name": document_name,
-        "total_risks_found": len(risks),
-        "risk_score": risk_score,
-        "risk_level": risk_level,
-        "risks": risks,
-        "metadata": extract_contract_metadata(text),
-        "docx_download_url": f"/api/v1/legal/download-redline/{uuid.uuid4().hex[:8]}",
-        "summary": f"Reviewed {document_name}: {len(risks)} finding(s), risk score {risk_score}/100.",
-    }
+    """Compatibility wrapper around the independent contract-review module."""
+    result = review_contract(contract_text, document_name, "NEUTRAL")
+    result["docx_download_url"] = (
+        f"/api/v1/legal/download-redline/{uuid.uuid4().hex[:8]}"
+    )
+    return result
 
 
 def detect_sensitive_data(text: str, headers: list[str] | None = None) -> dict[str, Any]:

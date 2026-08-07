@@ -2,13 +2,15 @@
 
 import ipaddress
 import json
+import mimetypes
 import re
 import socket
 import uuid
 from datetime import date
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
@@ -24,7 +26,7 @@ from app.services.document_ingestion import (
     resume_document_ingestion,
 )
 from app.services.document_parser import DocumentParseError, extract_file_text
-from app.services.knowledge_storage import save_original_file
+from app.services.knowledge_storage import read_original_file, save_original_file
 from app.services.embedding_service import calculate_content_hash
 from app.services.rag_service import (
     chunk_document_content,
@@ -387,6 +389,41 @@ def _document_visible_to_user(document: KnowledgeDocument, current_user: User) -
     return not allowed_roles or bool(principals.intersection(allowed_roles))
 
 
+def _visible_document_reader_source(
+    db: Session,
+    current_user: User,
+    document_id: str,
+    version: str,
+) -> tuple[KnowledgeDocument | None, list[DocumentChunk]]:
+    """Resolve a readable document without leaking inaccessible IDs."""
+    record = db.query(KnowledgeDocument).filter(
+        KnowledgeDocument.tenant_id == current_user.tenant_id,
+        KnowledgeDocument.document_id == document_id,
+        KnowledgeDocument.version == version,
+    ).first()
+    if record and not _document_visible_to_user(record, current_user):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    chunks = db.query(DocumentChunk).filter(
+        DocumentChunk.tenant_id == current_user.tenant_id,
+        or_(
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.document_name == document_id,
+        ),
+        DocumentChunk.version == version,
+    ).order_by(DocumentChunk.chunk_index).all()
+    visible_chunks = [
+        chunk
+        for chunk in chunks
+        if chunk.department_access in {"ALL", current_user.department}
+        or current_user.role in {"Owner", "Admin", "CEO"}
+        if _chunk_visible_to_user(chunk, current_user)
+    ]
+    if not record and not visible_chunks:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return record, visible_chunks
+
+
 def _extract_file_text(filename: str, data: bytes) -> str:
     try:
         return extract_file_text(filename, data)
@@ -527,6 +564,86 @@ def list_documents(
         if key not in record_keys:
             item["chunk_count"] += 1
     return list(docs.values())
+
+
+@router.get("/{document_id}/reader", summary="Read an ACL-filtered knowledge document")
+def read_document(
+    document_id: str,
+    version: str = "1.0",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> dict[str, Any]:
+    record, chunks = _visible_document_reader_source(
+        db, current_user, document_id, version
+    )
+    content = (record.parsed_text or "").strip() if record else ""
+    if not content:
+        content = "\n\n".join(
+            chunk.content.strip() for chunk in chunks if chunk.content.strip()
+        )
+    if not content:
+        raise HTTPException(status_code=422, detail="Document has no readable content")
+    first_chunk = chunks[0] if chunks else None
+    document_name = (
+        record.file_name
+        if record
+        else first_chunk.document_name
+        if first_chunk
+        else document_id
+    )
+    return {
+        "document_id": document_id,
+        "document_name": document_name,
+        "document_title": (
+            record.document_title
+            if record
+            else first_chunk.document_title or document_name
+        ),
+        "document_type": (
+            record.document_type if record else first_chunk.document_type
+        ),
+        "version": version,
+        "content": content,
+        "character_count": len(content),
+        "chunk_count": len(chunks),
+        "source_url": record.source_url if record else None,
+        "download_url": (
+            f"/api/v1/documents/{quote(document_id, safe='')}/download?version={quote(version, safe='')}"
+            if record and record.storage_key
+            else None
+        ),
+    }
+
+
+@router.get("/{document_id}/download", summary="Download an authorized original knowledge file")
+def download_document(
+    document_id: str,
+    version: str = "1.0",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Response:
+    record, _ = _visible_document_reader_source(
+        db, current_user, document_id, version
+    )
+    if not record or not record.storage_key:
+        raise HTTPException(status_code=404, detail="Original file is not available")
+    try:
+        content = read_original_file(record.storage_key)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Original file is not available") from exc
+    filename = Path(record.file_name).name
+    ascii_filename = re.sub(r"[^A-Za-z0-9._-]+", "_", filename) or "document"
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{ascii_filename}\"; "
+                f"filename*=UTF-8''{quote(filename)}"
+            )
+        },
+    )
 
 
 @router.get(

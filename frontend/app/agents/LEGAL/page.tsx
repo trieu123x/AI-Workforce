@@ -13,7 +13,6 @@ import {
   ChevronRight,
   CircleGauge,
   Code2,
-  Download,
   FileDiff,
   FileKey2,
   FilePlus2,
@@ -33,19 +32,24 @@ import {
   UsersRound,
   WandSparkles,
   X,
+  Download,
+  ExternalLink,
+  Eye,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
 import ChatMessageContent from "@/components/chat/ChatMessageContent";
+import LegalDocumentGeneratorModal from "@/components/legal/LegalDocumentGeneratorModal";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/useAuthStore";
 import styles from "./legal.module.css";
 
 type View = "overview" | "review" | "knowledge" | "compliance";
 type ReviewMode = "contract" | "compare" | "privacy" | "license";
-type Severity = "HIGH" | "MEDIUM" | "LOW";
+type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+type RepresentedParty = "" | "PARTY_A" | "PARTY_B" | "NEUTRAL";
 
 interface Agent { name: string; description?: string; is_active: boolean; }
 interface DocumentItem {
@@ -63,14 +67,53 @@ interface DocumentItem {
 interface ApprovalItem { id: string; action_type: string; risk_level: Severity | "CRITICAL"; workflow_title: string; }
 interface Citation { document_name?: string; section_title?: string; citation_tag?: string; }
 interface ChatResult { reply: string; citations: Citation[]; conversation_id: string; }
-interface RiskFinding { clause: string; severity: Severity; recommendation: string; evidence: string; category: string; }
+interface RiskFinding {
+  id: string;
+  clause: string;
+  clause_title: string;
+  severity: Severity;
+  category: string;
+  finding_type: "LEGAL_ISSUE" | "COMMERCIAL_RISK" | "POLICY_VIOLATION" | "MISSING_CLAUSE" | "AMBIGUOUS_CLAUSE" | "INTERNAL_CONFLICT";
+  issue: string;
+  reason: string;
+  recommendation: string;
+  evidence: string;
+  original_text: string;
+  suggested_revision: string;
+  perspective: string;
+  impact: "ADVERSE" | "BENEFICIAL" | "BALANCED" | "SHARED";
+  sources: Array<{ id: string; title: string; type: string; url?: string; note?: string }>;
+}
 interface ContractReview {
+  review_version: string;
   document_name: string;
   risk_score: number;
   risk_level: Severity;
   total_risks_found: number;
   risks: RiskFinding[];
-  metadata: { dates: string[]; amounts: string[]; payment_terms?: string | null; expiry_clause?: string | null };
+  findings: RiskFinding[];
+  represented_party: Exclude<RepresentedParty, "">;
+  represented_party_label: string;
+  contract_type: string;
+  contract_type_label: string;
+  contract_type_confidence: number;
+  metadata: {
+    contract_title: string; party_a: string; party_b: string;
+    party_a_label: string; party_b_label: string; party_a_role: "COMPANY"; party_b_role: "CUSTOMER";
+    party_a_source: "DOCUMENT" | "SYSTEM_DEFAULT"; party_b_source: "DOCUMENT" | "SYSTEM_DEFAULT";
+    party_mapping_source: "DOCUMENT" | "DOCUMENT_AND_SYSTEM_DEFAULT" | "SYSTEM_DEFAULT";
+    party_mapping_warnings: string[];
+    contract_value?: string | null; dates: string[]; start_date?: string | null;
+    end_date?: string | null; payment_terms: string[]; term?: string | null; clause_count: number;
+  };
+  checklist: Array<{ category: string; label: string; status: "PRESENT" | "MISSING"; severity_if_missing: Severity }>;
+  severity_counts: Record<Severity, number>;
+  missing_clauses_count: number;
+  internal_conflicts_count: number;
+  policy_violations_count: number;
+  category_summary: Array<{ category: string; severity: Severity }>;
+  reference_sources: Array<{ id: string; title: string; type: string; url?: string; reader_url?: string; note?: string; citation_tag?: string; section_title?: string }>;
+  review_disclaimer: string;
   approval_created: boolean;
   workflow_id?: string | null;
 }
@@ -101,22 +144,24 @@ interface LicenseResult {
   approval_created?: boolean;
 }
 interface SearchResult { id: string; document_name: string; section_title: string; content: string; citation_tag: string; score: number; }
+interface DocumentReader {
+  document_id?: string;
+  document_name: string;
+  document_title: string;
+  document_type?: string;
+  version?: string;
+  content: string;
+  character_count?: number;
+  chunk_count?: number;
+  source_url?: string | null;
+  download_url?: string | null;
+}
 
 const REVIEW_MODES: Array<{ id: ReviewMode; label: string; icon: typeof FileSearch; accept: string }> = [
   { id: "contract", label: "Rà soát hợp đồng", icon: FileSearch, accept: ".pdf,.docx,.txt,.md,.csv" },
   { id: "compare", label: "So sánh phiên bản", icon: FileDiff, accept: ".pdf,.docx,.txt,.md" },
   { id: "privacy", label: "Kiểm tra dữ liệu", icon: Fingerprint, accept: ".xlsx,.csv,.json,.txt,.pdf,.docx" },
   { id: "license", label: "License phần mềm", icon: Code2, accept: ".json,.txt" },
-];
-
-const GENERATOR_TYPES = [
-  ["NDA", "NDA"],
-  ["EMPLOYMENT_CONTRACT", "Hợp đồng lao động"],
-  ["FREELANCER_CONTRACT", "Freelancer Contract"],
-  ["INTERNSHIP_CONTRACT", "Hợp đồng thực tập"],
-  ["SERVICE_AGREEMENT", "Service Agreement"],
-  ["SOFTWARE_DEVELOPMENT_CONTRACT", "Software Development Contract"],
-  ["MAINTENANCE_CONTRACT", "Maintenance Contract"],
 ];
 
 function messageFrom(error: unknown) {
@@ -146,13 +191,11 @@ export default function LegalAgentPage() {
   const [reviewMode, setReviewMode] = useState<ReviewMode>("contract");
   const [primaryFile, setPrimaryFile] = useState<File | null>(null);
   const [secondaryFile, setSecondaryFile] = useState<File | null>(null);
+  const [representedParty, setRepresentedParty] = useState<RepresentedParty>("");
   const [reviewResult, setReviewResult] = useState<ContractReview | PrivacyResult | CompareResult | LicenseResult | null>(null);
   const [knowledgeQuery, setKnowledgeQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [showGenerator, setShowGenerator] = useState(false);
-  const [generatorType, setGeneratorType] = useState("NDA");
-  const [generatorFormat, setGeneratorFormat] = useState("docx");
-  const [generatorFields, setGeneratorFields] = useState({ party_a: "", party_b: "", effective_date: "", duration: "", fee: "", scope: "" });
   const questionRef = useRef<HTMLInputElement | null>(null);
 
   const loadData = useCallback(async () => {
@@ -216,11 +259,12 @@ export default function LegalAgentPage() {
     setReviewResult(null);
     setPrimaryFile(null);
     setSecondaryFile(null);
+    setRepresentedParty("");
     setView(mode === "privacy" || mode === "license" ? "compliance" : "review");
   };
 
   const analyzeFiles = async () => {
-    if (!primaryFile || (reviewMode === "compare" && !secondaryFile)) return;
+    if (!primaryFile || (reviewMode === "compare" && !secondaryFile) || (reviewMode === "contract" && !representedParty)) return;
     setBusy(true);
     setError(null);
     setReviewResult(null);
@@ -233,6 +277,7 @@ export default function LegalAgentPage() {
         endpoint = "/api/v1/legal/compare-documents";
       } else {
         form.append("file", primaryFile);
+        if (reviewMode === "contract") form.append("represented_party", representedParty);
         if (reviewMode === "privacy") endpoint = "/api/v1/legal/privacy-check";
         if (reviewMode === "license") endpoint = "/api/v1/legal/license-check";
       }
@@ -254,30 +299,6 @@ export default function LegalAgentPage() {
     try {
       const { data } = await api.post<SearchResult[]>("/api/v1/documents/search", { query: knowledgeQuery, top_k: 8 });
       setSearchResults(data);
-    } catch (reason) {
-      setError(messageFrom(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const generateDocument = async (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const { data } = await api.post("/api/v1/legal/generate-document", {
-        document_type: generatorType,
-        output_format: generatorFormat,
-        fields: generatorFields,
-      }, { responseType: "blob" });
-      const url = URL.createObjectURL(data);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${generatorType.toLowerCase()}.${generatorFormat}`;
-      link.click();
-      URL.revokeObjectURL(url);
-      setShowGenerator(false);
     } catch (reason) {
       setError(messageFrom(reason));
     } finally {
@@ -389,11 +410,13 @@ export default function LegalAgentPage() {
             {(view === "review" || view === "compliance") && (
               <ReviewWorkspace
                 mode={reviewMode}
-                setMode={(nextMode) => { setReviewMode(nextMode); setReviewResult(null); setPrimaryFile(null); setSecondaryFile(null); }}
+                setMode={(nextMode) => { setReviewMode(nextMode); setReviewResult(null); setPrimaryFile(null); setSecondaryFile(null); setRepresentedParty(""); }}
                 primaryFile={primaryFile}
                 secondaryFile={secondaryFile}
                 setPrimaryFile={setPrimaryFile}
                 setSecondaryFile={setSecondaryFile}
+                representedParty={representedParty}
+                setRepresentedParty={setRepresentedParty}
                 result={reviewResult}
                 busy={busy}
                 analyze={analyzeFiles}
@@ -415,24 +438,7 @@ export default function LegalAgentPage() {
         </div>
       </div>
 
-      {showGenerator && (
-        <div className={styles.modalBackdrop} onMouseDown={(event) => { if (event.target === event.currentTarget) setShowGenerator(false); }}>
-          <form className={styles.modal} onSubmit={generateDocument}>
-            <header><div><span><WandSparkles size={19} /></span><div><h2>Tạo văn bản pháp lý</h2><p>Bản nháp cần Legal phê duyệt trước khi ký</p></div></div><button type="button" onClick={() => setShowGenerator(false)} title="Đóng"><X size={17} /></button></header>
-            <div className={styles.modalBody}>
-              <label className={styles.fullField}>Loại văn bản<select value={generatorType} onChange={(event) => setGeneratorType(event.target.value)}>{GENERATOR_TYPES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-              <label>Bên A<input value={generatorFields.party_a} onChange={(event) => setGeneratorFields({ ...generatorFields, party_a: event.target.value })} placeholder="Tên công ty" required /></label>
-              <label>Bên B<input value={generatorFields.party_b} onChange={(event) => setGeneratorFields({ ...generatorFields, party_b: event.target.value })} placeholder="Cá nhân / đối tác" required /></label>
-              <label>Ngày hiệu lực<input type="date" value={generatorFields.effective_date} onChange={(event) => setGeneratorFields({ ...generatorFields, effective_date: event.target.value })} /></label>
-              <label>Thời hạn<input value={generatorFields.duration} onChange={(event) => setGeneratorFields({ ...generatorFields, duration: event.target.value })} placeholder="Ví dụ: 6 tháng" /></label>
-              <label className={styles.fullField}>Phí / phụ cấp<input value={generatorFields.fee} onChange={(event) => setGeneratorFields({ ...generatorFields, fee: event.target.value })} placeholder="Ví dụ: 5.000.000 VNĐ / tháng" /></label>
-              <label className={styles.fullField}>Phạm vi<textarea rows={3} value={generatorFields.scope} onChange={(event) => setGeneratorFields({ ...generatorFields, scope: event.target.value })} placeholder="Phạm vi công việc và deliverables" /></label>
-              <div className={styles.formatControl}><span>Định dạng</span><div><button type="button" className={generatorFormat === "docx" ? styles.selected : ""} onClick={() => setGeneratorFormat("docx")}>DOCX</button><button type="button" className={generatorFormat === "pdf" ? styles.selected : ""} onClick={() => setGeneratorFormat("pdf")}>PDF</button></div></div>
-            </div>
-            <footer><button type="button" className={styles.secondaryButton} onClick={() => setShowGenerator(false)}>Hủy</button><button type="submit" className={styles.primaryButton} disabled={busy}>{busy ? <Loader2 className={styles.spin} size={16} /> : <Download size={16} />}Tạo và tải xuống</button></footer>
-          </form>
-        </div>
-      )}
+      {showGenerator && <LegalDocumentGeneratorModal onClose={() => setShowGenerator(false)} />}
     </div>
   );
 }
@@ -441,9 +447,10 @@ function Tool({ icon: Icon, title, meta, tone, onClick }: { icon: typeof FileSea
   return <button className={styles.tool} onClick={onClick}><span className={`${styles.toolIcon} ${styles[tone]}`}><Icon size={20} /></span><span><strong>{title}</strong><small>{meta}</small></span><ChevronRight size={16} /></button>;
 }
 
-function ReviewWorkspace({ mode, setMode, primaryFile, secondaryFile, setPrimaryFile, setSecondaryFile, result, busy, analyze }: {
+function ReviewWorkspace({ mode, setMode, primaryFile, secondaryFile, setPrimaryFile, setSecondaryFile, representedParty, setRepresentedParty, result, busy, analyze }: {
   mode: ReviewMode; setMode: (mode: ReviewMode) => void; primaryFile: File | null; secondaryFile: File | null;
   setPrimaryFile: (file: File | null) => void; setSecondaryFile: (file: File | null) => void;
+  representedParty: RepresentedParty; setRepresentedParty: (party: RepresentedParty) => void;
   result: ContractReview | PrivacyResult | CompareResult | LicenseResult | null; busy: boolean; analyze: () => void;
 }) {
   const config = REVIEW_MODES.find((item) => item.id === mode)!;
@@ -453,9 +460,18 @@ function ReviewWorkspace({ mode, setMode, primaryFile, secondaryFile, setPrimary
     <div className={styles.reviewGrid}>
       <section className={styles.uploadPanel}>
         <div className={styles.sectionHeader}><div><h2>{config.label}</h2><p>{mode === "compare" ? "Chọn bản cũ và bản mới" : "PDF, DOCX, TXT, CSV, XLSX hoặc JSON · tối đa 10 MB"}</p></div></div>
+        {mode === "contract" && <div className={styles.partySelector}>
+          <strong>Bạn đang đại diện cho bên nào?</strong>
+          <small>Góc nhìn này ảnh hưởng trực tiếp đến mức rủi ro của từng điều khoản.</small>
+          <div>
+            {([ ["PARTY_A", "Bên A · Công ty"], ["PARTY_B", "Bên B · Khách hàng"], ["NEUTRAL", "Neutral review"] ] as const).map(([value, label]) =>
+              <button key={value} type="button" className={representedParty === value ? styles.partySelected : ""} onClick={() => setRepresentedParty(value)}>{label}</button>
+            )}
+          </div>
+        </div>}
         <FilePicker label={mode === "compare" ? "Hợp đồng V1" : "Tài liệu cần kiểm tra"} file={primaryFile} setFile={setPrimaryFile} accept={config.accept} />
         {mode === "compare" && <FilePicker label="Hợp đồng V2" file={secondaryFile} setFile={setSecondaryFile} accept={config.accept} />}
-        <button className={styles.analyzeButton} disabled={busy || !primaryFile || (mode === "compare" && !secondaryFile)} onClick={analyze}>{busy ? <Loader2 className={styles.spin} size={17} /> : <Sparkles size={17} />}{busy ? "Đang phân tích…" : "Phân tích tài liệu"}</button>
+        <button className={styles.analyzeButton} disabled={busy || !primaryFile || (mode === "compare" && !secondaryFile) || (mode === "contract" && !representedParty)} onClick={analyze}>{busy ? <Loader2 className={styles.spin} size={17} /> : <Sparkles size={17} />}{busy ? "Đang phân tích…" : "Phân tích tài liệu"}</button>
         <div className={styles.securityNote}><LockKeyhole size={15} /><span><strong>Xử lý trong tenant của doanh nghiệp</strong><small>Không gửi nội dung sang dịch vụ ngoài workflow được phê duyệt.</small></span></div>
       </section>
       <section className={styles.resultPanel}>
@@ -477,14 +493,149 @@ function FilePicker({ label, file, setFile, accept }: { label: string; file: Fil
 }
 
 function ResultView({ result }: { result: ContractReview | PrivacyResult | CompareResult | LicenseResult }) {
-  if ("risk_score" in result) return <div className={styles.contractResult}>
-    <header><div className={`${styles.scoreRing} ${riskClass(result.risk_level)}`}><strong>{result.risk_score}</strong><small>/100</small></div><div><span className={`${styles.riskBadge} ${riskClass(result.risk_level)}`}>{result.risk_level} RISK</span><h2>{result.document_name}</h2><p>{result.total_risks_found} phát hiện cần xem xét</p></div></header>
-    {result.approval_created && <div className={styles.workflowAlert}><ShieldAlert size={17} /><span><strong>Đã tạo approval workflow</strong><small>Employee → Manager → Legal Team</small></span></div>}
-    <div className={styles.findings}>{result.risks.map((item, index) => <article key={`${item.category}-${index}`}><div><span className={`${styles.severityDot} ${riskClass(item.severity)}`} /><strong>{item.clause}</strong><span className={`${styles.riskBadge} ${riskClass(item.severity)}`}>{item.severity}</span></div><blockquote>{item.evidence}</blockquote><p>{item.recommendation}</p></article>)}</div>
-  </div>;
+  if ("risk_score" in result) return <ContractReviewResult review={result} />;
   if ("similarity_percent" in result) return <div className={styles.compareResult}><header><span><FileDiff size={20} /></span><div><h2>{result.total_changes} thay đổi</h2><p>Tương đồng {result.similarity_percent}% · {result.old_document} → {result.new_document}</p></div></header><div className={styles.changes}>{result.changes.map((change, index) => <article key={index}><span className={styles.changeType}>{change.type}</span>{change.old.map((line, i) => <p className={styles.oldLine} key={`old-${i}`}>− {line}</p>)}{change.new.map((line, i) => <p className={styles.newLine} key={`new-${i}`}>+ {line}</p>)}</article>)}</div></div>;
   if ("contains_sensitive_data" in result) return <div className={styles.privacyResult}><header><span className={result.requires_legal_approval ? styles.dangerMark : styles.safeMark}>{result.requires_legal_approval ? <ShieldAlert size={22} /> : <ShieldCheck size={22} />}</span><div><span className={`${styles.riskBadge} ${riskClass(result.risk_level)}`}>{result.risk_level}</span><h2>{result.requires_legal_approval ? "Cần Legal phê duyệt" : "Không phát hiện dữ liệu nhạy cảm"}</h2><p>{result.document_name}</p></div></header>{result.approval_created && <div className={styles.workflowAlert}><ShieldAlert size={17} /><span><strong>Đã tạo approval workflow</strong><small>Employee → Manager → Legal Team</small></span></div>}<div className={styles.piiGrid}>{result.findings.map((item) => <div key={item.type}><Fingerprint size={15} /><span><strong>{item.type}</strong><small>{item.count == null ? "Phát hiện theo cột" : `${item.count} giá trị`}</small></span></div>)}</div><div className={styles.actionNote}><strong>Hành động đề xuất</strong><p>{result.suggested_action}</p></div></div>;
   return <div className={styles.licenseResult}><header><span><Code2 size={21} /></span><div><span className={`${styles.riskBadge} ${riskClass(result.risk_level)}`}>{result.risk_level}</span><h2>{result.dependencies_scanned} dependency đã quét</h2><p>{result.manifest}</p></div></header>{result.commercial_use_requires_review && <div className={styles.workflowAlert}><AlertTriangle size={17} /><span><strong>{result.approval_created ? "Đã tạo approval workflow" : "Cần kiểm tra license thương mại"}</strong><small>Không phát hành trước khi Legal xác nhận.</small></span></div>}<div className={styles.licenseList}>{result.findings.map((item) => <article key={`${item.package}-${item.license}`}><span className={`${styles.licenseTag} ${riskClass(item.severity)}`}>{item.license}</span><div><strong>{item.package}</strong><small>{item.action}</small></div></article>)}</div></div>;
+}
+
+function ContractReviewResult({ review }: { review: ContractReview }) {
+  const [decisions, setDecisions] = useState<Record<string, "ACCEPTED" | "REJECTED" | "EDITED">>({});
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [reader, setReader] = useState<DocumentReader | null>(null);
+  const [readerLoading, setReaderLoading] = useState(false);
+  const [readerError, setReaderError] = useState<string | null>(null);
+  const metadata = review.metadata;
+  const findingTypeLabels: Record<RiskFinding["finding_type"], string> = {
+    LEGAL_ISSUE: "Vấn đề pháp lý", COMMERCIAL_RISK: "Rủi ro thương mại",
+    POLICY_VIOLATION: "Vi phạm policy", MISSING_CLAUSE: "Điều khoản thiếu",
+    AMBIGUOUS_CLAUSE: "Điều khoản mơ hồ", INTERNAL_CONFLICT: "Mâu thuẫn nội bộ",
+  };
+
+  const setDecision = (id: string, decision: "ACCEPTED" | "REJECTED") => {
+    setDecisions((current) => ({ ...current, [id]: decision }));
+    setEditingId(null);
+  };
+
+  const openReference = async (source: ContractReview["reference_sources"][number]) => {
+    if (source.url) {
+      window.open(source.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    setReaderError(null);
+    if (!source.reader_url) {
+      setReader({
+        document_name: source.title,
+        document_title: source.title,
+        document_type: source.type,
+        content: source.note || "Nguồn này là rule pack hệ thống và chưa có file gốc trong Knowledge Base.",
+      });
+      return;
+    }
+    setReaderLoading(true);
+    try {
+      const { data } = await api.get<DocumentReader>(source.reader_url);
+      setReader(data);
+    } catch (reason) {
+      setReaderError(messageFrom(reason));
+    } finally {
+      setReaderLoading(false);
+    }
+  };
+
+  const downloadOriginal = async () => {
+    if (!reader?.download_url) return;
+    setReaderError(null);
+    try {
+      const response = await api.get<Blob>(reader.download_url, { responseType: "blob" });
+      const objectUrl = URL.createObjectURL(response.data);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = reader.document_name;
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+    } catch (reason) {
+      setReaderError(messageFrom(reason));
+    }
+  };
+
+  return <div className={styles.contractResult}>
+    <header><div className={`${styles.scoreRing} ${riskClass(review.risk_level)}`}><strong>{review.risk_score}</strong><small>/100</small></div><div><span className={`${styles.riskBadge} ${riskClass(review.risk_level)}`}>{review.risk_level} RISK</span><h2>{review.document_name}</h2><p>{review.contract_type_label} · {review.represented_party_label} · {review.total_risks_found} phát hiện</p></div></header>
+    <div className={styles.contractScroll}>
+      {review.approval_created && <div className={styles.workflowAlert}><ShieldAlert size={17} /><span><strong>Đã tạo approval workflow</strong><small>Employee → Manager → Legal Team</small></span></div>}
+
+      <section className={styles.reviewSection}>
+        <div className={styles.reviewSectionTitle}><div><strong>Tóm tắt hợp đồng</strong><small>Loại hợp đồng được nhận diện với độ tin cậy {Math.round(review.contract_type_confidence * 100)}%</small></div></div>
+        <div className={styles.metadataGrid}>
+          <div><small>Tên hợp đồng</small><strong>{metadata.contract_title}</strong></div>
+          <div><small>{metadata.party_a_label}</small><strong>{metadata.party_a}</strong><em>{metadata.party_a_source === "DOCUMENT" ? "Theo tài liệu" : "Hệ thống tự định nghĩa"}</em></div>
+          <div><small>{metadata.party_b_label}</small><strong>{metadata.party_b}</strong><em>{metadata.party_b_source === "DOCUMENT" ? "Theo tài liệu" : "Hệ thống tự định nghĩa"}</em></div>
+          <div><small>Giá trị</small><strong>{metadata.contract_value || "Chưa trích xuất"}</strong></div>
+          <div><small>Thời hạn</small><strong>{metadata.start_date || "—"} → {metadata.end_date || "—"}</strong></div>
+          <div><small>Cấu trúc</small><strong>{metadata.clause_count} điều khoản</strong></div>
+        </div>
+        {metadata.party_mapping_warnings.length > 0 && <div className={styles.partyWarning}><AlertTriangle size={14} /><div><strong>Cần xác nhận vai trò các bên</strong>{metadata.party_mapping_warnings.map((warning) => <p key={warning}>{warning}</p>)}</div></div>}
+        {metadata.payment_terms.length > 0 && <div className={styles.paymentSummary}><small>Điều kiện thanh toán</small><p>{metadata.payment_terms[0]}</p></div>}
+      </section>
+
+      <section className={styles.reviewSection}>
+        <div className={styles.reviewSectionTitle}><div><strong>Tổng quan rủi ro</strong><small>Điểm được tính từ mức độ và có floor theo finding nghiêm trọng nhất</small></div></div>
+        <div className={styles.riskMetrics}>
+          {(["CRITICAL", "HIGH", "MEDIUM", "LOW"] as Severity[]).map((level) => <div key={level}><strong className={riskClass(level)}>{review.severity_counts[level] || 0}</strong><small>{level}</small></div>)}
+          <div><strong>{review.missing_clauses_count}</strong><small>Thiếu điều khoản</small></div>
+          <div><strong>{review.internal_conflicts_count}</strong><small>Mâu thuẫn</small></div>
+          <div><strong>{review.policy_violations_count}</strong><small>Vi phạm policy</small></div>
+        </div>
+        <p className={styles.scoringNote}>Cách tính: CRITICAL +35 · HIGH +22 · MEDIUM +10 · LOW +4. Nếu có một finding HIGH, điểm tổng tối thiểu là 70; chỉ finding CRITICAL mới làm báo cáo mang nhãn CRITICAL.</p>
+        <div className={styles.categorySummary}>{review.category_summary.map((item) => <span key={item.category}>{item.category}<b className={riskClass(item.severity)}>{item.severity}</b></span>)}</div>
+      </section>
+
+      <section className={styles.reviewSection}>
+        <div className={styles.reviewSectionTitle}><div><strong>Checklist theo loại hợp đồng</strong><small>{review.checklist.filter((item) => item.status === "PRESENT").length}/{review.checklist.length} nhóm điều khoản hiện diện</small></div></div>
+        <div className={styles.checklist}>{review.checklist.map((item) => <div key={item.category} className={item.status === "MISSING" ? styles.missingItem : ""}>{item.status === "PRESENT" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}<span>{item.label}</span><small>{item.status === "PRESENT" ? "Có" : `Thiếu · ${item.severity_if_missing}`}</small></div>)}</div>
+      </section>
+
+      <section className={`${styles.reviewSection} ${styles.findingSection}`}>
+        <div className={styles.reviewSectionTitle}><div><strong>Phát hiện & đề xuất sửa</strong><small>AI không thay đổi file gốc; mỗi đề xuất cần được xác nhận</small></div></div>
+        <div className={styles.findings}>{review.findings.map((item) => {
+          const decision = decisions[item.id];
+          const draft = drafts[item.id] ?? item.suggested_revision;
+          return <article key={item.id}>
+            <div className={styles.findingHeader}><span className={`${styles.severityDot} ${riskClass(item.severity)}`} /><strong>{item.clause === "MISSING" ? item.issue : `Điều ${item.clause} · ${item.issue}`}</strong><span className={`${styles.impactBadge} ${styles[item.impact.toLowerCase()]}`}>{item.impact === "ADVERSE" ? "Bất lợi" : item.impact === "BENEFICIAL" ? "Có lợi" : item.impact === "BALANCED" ? "Cân bằng" : "Chung"}</span><span className={styles.findingType}>{findingTypeLabels[item.finding_type]}</span><span className={`${styles.riskBadge} ${riskClass(item.severity)}`}>{item.severity}</span></div>
+            <div className={styles.findingExplanation}><p><b>Lý do:</b> {item.reason}</p><p><b>Khuyến nghị:</b> {item.recommendation}</p></div>
+            <div className={styles.redlineGrid}>
+              <div><small>ORIGINAL</small><blockquote>{item.original_text}</blockquote></div>
+              <div><small>AI RECOMMENDATION</small>{editingId === item.id ? <textarea value={draft} onChange={(event) => setDrafts((current) => ({ ...current, [item.id]: event.target.value }))} /> : <blockquote>{draft}</blockquote>}</div>
+            </div>
+            {item.sources.length > 0 && <div className={styles.findingSources}>{item.sources.map((source) => source.url ? <a key={source.id} href={source.url} target="_blank" rel="noreferrer">{source.title}</a> : <span key={source.id}>{source.title}</span>)}</div>}
+            <div className={styles.findingActions}>
+              <button className={decision === "ACCEPTED" ? styles.accepted : ""} onClick={() => setDecision(item.id, "ACCEPTED")}><Check size={13} />Accept</button>
+              <button className={decision === "REJECTED" ? styles.rejected : ""} onClick={() => setDecision(item.id, "REJECTED")}><X size={13} />Reject</button>
+              <button className={decision === "EDITED" ? styles.edited : ""} onClick={() => {
+                if (editingId === item.id) { setDecisions((current) => ({ ...current, [item.id]: "EDITED" })); setEditingId(null); }
+                else { setDrafts((current) => ({ ...current, [item.id]: draft })); setEditingId(item.id); }
+              }}>{editingId === item.id ? <><Check size={13} />Lưu bản sửa</> : "Edit"}</button>
+              {decision && <small>{decision === "ACCEPTED" ? "Đã chấp nhận đề xuất" : decision === "REJECTED" ? "Đã từ chối" : "Đã lưu bản chỉnh sửa"}</small>}
+            </div>
+          </article>;
+        })}</div>
+      </section>
+
+      {review.reference_sources.length > 0 && <section className={styles.reviewSection}><div className={styles.reviewSectionTitle}><div><strong>Nguồn tham chiếu</strong><small>Click vào tên nguồn để mở và đọc nội dung</small></div></div><div className={styles.referenceList}>{review.reference_sources.map((source) => <div key={`${source.id}-${source.type}`}><span>{source.type}</span><button type="button" onClick={() => void openReference(source)} disabled={readerLoading}><span>{source.title}</span>{source.url ? <ExternalLink size={12} /> : <Eye size={12} />}</button><small>{source.note}</small></div>)}</div></section>}
+      <p className={styles.reviewDisclaimer}>{review.review_disclaimer}</p>
+    </div>
+    {(reader || readerLoading || readerError) && <div className={styles.readerBackdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) { setReader(null); setReaderError(null); } }}>
+      <section className={styles.readerModal} role="dialog" aria-modal="true" aria-label="Trình đọc tài liệu tham chiếu">
+        <header><div><span><FileText size={19} /></span><div><strong>{reader?.document_title || "Đang mở tài liệu…"}</strong><small>{reader ? `${reader.document_name}${reader.version ? ` · v${reader.version}` : ""}` : "Đang tải nội dung theo quyền truy cập"}</small></div></div><button type="button" onClick={() => { setReader(null); setReaderError(null); }} aria-label="Đóng trình đọc"><X size={17} /></button></header>
+        {readerLoading ? <div className={styles.readerState}><Loader2 className={styles.spin} size={20} />Đang đọc tài liệu…</div> : readerError ? <div className={`${styles.readerState} ${styles.readerError}`}><AlertTriangle size={18} />{readerError}</div> : reader && <>
+          <div className={styles.readerMeta}><span>{reader.document_type || "DOCUMENT"}</span>{reader.chunk_count != null && <span>{reader.chunk_count} chunks</span>}{reader.character_count != null && <span>{reader.character_count.toLocaleString("vi-VN")} ký tự</span>}</div>
+          <pre className={styles.readerContent}>{reader.content}</pre>
+          <footer>{reader.source_url && <a href={reader.source_url} target="_blank" rel="noreferrer"><ExternalLink size={13} />Mở trang gốc</a>}{reader.download_url && <button type="button" onClick={() => void downloadOriginal()}><Download size={13} />Tải file gốc</button>}<button type="button" onClick={() => { setReader(null); setReaderError(null); }}>Đóng</button></footer>
+        </>}
+      </section>
+    </div>}
+  </div>;
 }
 
 function KnowledgeWorkspace({ documents, query, setQuery, search, results, busy, userRole }: { documents: DocumentItem[]; query: string; setQuery: (value: string) => void; search: (event: FormEvent) => void; results: SearchResult[]; busy: boolean; userRole: string }) {
