@@ -1,8 +1,13 @@
+from types import SimpleNamespace
+
+from app.api.v1 import specialized
 from app.services.contract_review import (
     detect_contract_type,
     review_contract,
     split_contract_clauses,
 )
+from app.services.document_parser import extract_file_text
+from app.services.legal_document_generator import generate_legal_document
 
 
 SOFTWARE_CONTRACT = """
@@ -160,4 +165,106 @@ Bên B sở hữu toàn bộ mã nguồn ngay từ ngày bắt đầu dự án.
     assert (customer_finding["severity"], customer_finding["impact"]) == (
         "LOW",
         "BENEFICIAL",
+    )
+
+
+def test_docx_reader_uses_document_library_and_keeps_vietnamese_text():
+    content, _, _ = generate_legal_document(
+        "NDA",
+        "docx",
+        {
+            "nda_type": "mutual",
+            "party_a": "NovaSoft",
+            "party_b": "Khách hàng ABC",
+            "purpose": "Đánh giá hợp tác",
+            "confidential_information": "Mã nguồn và dữ liệu kỹ thuật",
+            "effective_date": "2026-08-08",
+            "duration": "2 năm",
+            "confidentiality_duration": "3 năm",
+            "governing_law": "Việt Nam",
+            "dispute_resolution": "Trọng tài VIAC",
+        },
+    )
+
+    extracted = extract_file_text("nda.docx", content)
+
+    assert "THỎA THUẬN BẢO MẬT THÔNG TIN" in extracted
+    assert "Khách hàng ABC" in extracted
+
+
+def test_document_reader_and_original_download(client, ceo_token_headers):
+    original = "# Chính sách pháp lý\nNội dung dùng để kiểm tra trình đọc tài liệu.".encode()
+    uploaded = client.post(
+        "/api/v1/documents/upload",
+        data={
+            "document_id": "legal-reference-reader-test",
+            "document_title": "Chính sách pháp lý thử nghiệm",
+            "document_type": "policy",
+            "department_access": "LEGAL",
+            "collection_name": "Legal",
+            "version": "1.0",
+            "duplicate_strategy": "replace",
+        },
+        files={"file": ("legal-policy.md", original, "text/markdown")},
+        headers=ceo_token_headers,
+    )
+    assert uploaded.status_code == 201
+
+    reader = client.get(
+        "/api/v1/documents/legal-reference-reader-test/reader?version=1.0",
+        headers=ceo_token_headers,
+    )
+    assert reader.status_code == 200
+    payload = reader.json()
+    assert payload["document_title"] == "Chính sách pháp lý thử nghiệm"
+    assert "Nội dung dùng để kiểm tra" in payload["content"]
+    assert payload["download_url"]
+
+    downloaded = client.get(payload["download_url"], headers=ceo_token_headers)
+    assert downloaded.status_code == 200
+    assert downloaded.content == original
+    assert "attachment" in downloaded.headers["content-disposition"]
+
+
+def test_review_references_deduplicate_chunks_and_expose_reader_url(monkeypatch):
+    monkeypatch.setattr(
+        specialized,
+        "hybrid_search_documents",
+        lambda **_: [
+            {
+                "id": "chunk-1",
+                "document_id": "nda-template",
+                "document_name": "02_mau_thoa_thuan_NDA.docx",
+                "document_title": "Mẫu thỏa thuận NDA",
+                "version": "2.0",
+                "section_title": "Bảo mật",
+                "citation_tag": "[Citation: NDA]",
+                "score": 1.0,
+            },
+            {
+                "id": "chunk-2",
+                "document_id": "nda-template",
+                "document_name": "02_mau_thoa_thuan_NDA.docx",
+                "document_title": "Mẫu thỏa thuận NDA",
+                "version": "2.0",
+                "section_title": "Thời hạn",
+                "citation_tag": "[Citation: NDA]",
+                "score": 0.9,
+            },
+        ],
+    )
+    user = SimpleNamespace(
+        tenant_id="tenant",
+        role="CEO",
+        department="BOARD",
+    )
+
+    references = specialized._retrieve_contract_review_references(
+        object(), user, "NDA"
+    )
+
+    assert len(references) == 1
+    assert references[0]["type"] == "APPROVED_TEMPLATE"
+    assert references[0]["reader_url"].endswith(
+        "/nda-template/reader?version=2.0"
     )
